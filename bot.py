@@ -252,6 +252,10 @@ def get_settings_inline_keyboard() -> InlineKeyboardMarkup:
         callback_data="cmd_target"
     ))
     builder.row(InlineKeyboardButton(
+        text="💲 Set Bet Size",
+        callback_data="cmd_betsize"
+    ))
+    builder.row(InlineKeyboardButton(
         text="📈 Compare AI Modes",
         callback_data="cmd_compare"
     ))
@@ -310,6 +314,38 @@ def get_withdraw_keyboard() -> InlineKeyboardMarkup:
         ))
     builder.row(InlineKeyboardButton(text="💰 Withdraw All", callback_data="withdraw_all"))
     builder.row(InlineKeyboardButton(text="🔙 Back", callback_data="cmd_back"))
+    return builder.as_markup()
+
+
+def get_betsize_inline_keyboard(current_seq: list) -> InlineKeyboardMarkup:
+    """Bet Size Selection Inline Keyboard"""
+    builder = InlineKeyboardBuilder()
+
+    builder.row(InlineKeyboardButton(
+        text="💰 100-300-900-2700-8100 (Default)",
+        callback_data="setbetsize_100_300_900_2700_8100"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="💰 50-150-450-1350-4050 (Small)",
+        callback_data="setbetsize_50_150_450_1350_4050"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="💰 200-600-1800-5400-16200 (Medium)",
+        callback_data="setbetsize_200_600_1800_5400_16200"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="💰 500-1500-4500-13500-40500 (Large)",
+        callback_data="setbetsize_500_1500_4500_13500_40500"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="✏️ Custom Bet Size (စာရိုက်ထည့်ရန်)",
+        callback_data="betsize_custom"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="🔙 Back to Settings",
+        callback_data="cmd_back"
+    ))
+
     return builder.as_markup()
 
 
@@ -373,7 +409,7 @@ async def send_bet_result_notification(user_id, bet, actual_size, actual_number,
                 f"{Emoji.BULLSEYE if actual_size == 'BIG' else Emoji.GREEN_CIRCLE} "
                 f"{actual_size} {color}\n"
                 f"{Emoji.MONEY_ICON} <b>Balance:</b> {user['balance']:,.2f} Ks\n"
-                f"{Emoji.CHART_UP} <b>Profit:</b> +{session_profit:,.2f} Ks"
+                f"{Emoji.CHART_UP} <b>Session Profit:</b> +{session_profit:,.2f} Ks"
             )
         else:
             message = (
@@ -384,7 +420,7 @@ async def send_bet_result_notification(user_id, bet, actual_size, actual_number,
                 f"{Emoji.BULLSEYE if actual_size == 'BIG' else Emoji.GREEN_CIRCLE} "
                 f"{actual_size} {color}\n"
                 f"{Emoji.MONEY_ICON} <b>Balance:</b> {user['balance']:,.2f} Ks\n"
-                f"{Emoji.LOSS_ICON} <b>Profit:</b> {session_profit:,.2f} Ks"
+                f"{Emoji.LOSS_ICON} <b>Session Profit:</b> {session_profit:,.2f} Ks"
             )
 
         await bot.send_message(
@@ -510,7 +546,7 @@ async def check_game_and_predict(session: aiohttp.ClientSession):
                             if result["success"]:
                                 ai_name = AI_MODES.get(user_ai_mode, {}).get("name", "AI")
                                 order_msg = (
-                                    #f"{Emoji.ORDER} <b>Order Placed!</b>\n"
+                                    f"{Emoji.ORDER} <b>Order Placed!</b>\n"
                                     f"{Emoji.GAME_ICON} WINGO_30S: <code>{next_issue}</code>\n"
                                     f"{Emoji.CHART_ICON} {predicted_size} | {bet_amount:,.0f} Ks\n"
                                     f"{Emoji.BRAIN} {ai_name}"
@@ -698,33 +734,65 @@ async def cmd_start(message: types.Message):
 # ==========================================
 @auth_router.message(lambda m: m.text and m.text.strip() == "▶️ Start Auto-Bet")
 async def handle_start_button(message: types.Message):
+    """Start Auto-Bet with Full Reset"""
     user_id = message.from_user.id
     active_users = await db.get_active_users()
+
     if user_id in active_users:
-        await message.reply("✅ Already active!", reply_markup=get_main_reply_keyboard(True)); return
+        await message.reply("✅ Already active!", reply_markup=get_main_reply_keyboard(True))
+        return
+
     user_session = await db.get_user_session(user_id)
+
+    # ========== FULL RESET ==========
+    await db.reset_session_profit(user_id)
+    await db.users.update_one(
+        {"user_id": user_id},
+        {"$set": {"session_profit": 0.0, "win_streak": 0, "lose_streak": 0}}
+    )
+    await db.bets.delete_many({"user_id": user_id, "result": None})
+
+    # Activate session
     await db.activate_session(user_id, user_session.get("ai_mode", DEFAULT_AI_MODE))
+
     user = await db.get_user(user_id)
+    bet_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
+    bet_seq_str = " → ".join([f"{b:,}" for b in bet_seq])
+
     await message.reply(
         f"✅ <b>Auto-Bet Activated!</b>\n\n"
         f"💰 Balance: {user['balance']:,.0f} Ks\n"
-        f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks",
+        f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n"
+        f"💲 Bet Size: {bet_seq_str}\n"
+        f"🔄 Session Reset Complete!\n\n"
+        f"👇 Keyboard ကိုသုံးပါ:",
         reply_markup=get_main_reply_keyboard(True)
     )
 
 
 @auth_router.message(lambda m: m.text and m.text.strip() == "⏹️ Stop Auto-Bet")
 async def handle_stop_button(message: types.Message):
+    """Stop Auto-Bet"""
     user_id = message.from_user.id
     active_users = await db.get_active_users()
+
     if user_id not in active_users:
-        await message.reply("❌ Not active!", reply_markup=get_main_reply_keyboard(False)); return
+        await message.reply("❌ Not active!", reply_markup=get_main_reply_keyboard(False))
+        return
+
     await db.deactivate_session(user_id)
+
+    # Delete pending bets
+    await db.bets.delete_many({"user_id": user_id, "result": None})
+
     user = await db.get_user(user_id)
+
     await message.reply(
         f"🔴 <b>Auto-Bet Stopped!</b>\n\n"
         f"💰 Balance: {user['balance']:,.0f} Ks\n"
-        f"📈 Session Profit: {user['session_profit']:,.2f} Ks",
+        f"📈 Session Profit: {user['session_profit']:,.2f} Ks\n"
+        f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n\n"
+        f"🔄 Start ပြန်နှိပ်ရင် အားလုံး Reset လုပ်ပါမည်။",
         reply_markup=get_main_reply_keyboard(False)
     )
 
@@ -765,6 +833,10 @@ async def handle_status_button(message: types.Message):
     is_active = message.from_user.id in active_users
     user_session = await db.get_user_session(message.from_user.id)
     pending = await db.get_pending_bets_count(message.from_user.id)
+
+    bet_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
+    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
+
     await message.reply(
         f"📊 <b>သင့် Status</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -773,6 +845,7 @@ async def handle_status_button(message: types.Message):
         f"💰 Balance: {user['balance']:,.0f} Ks\n"
         f"📈 Session Profit: {user['session_profit']:,.2f} Ks\n"
         f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n"
+        f"💲 Bet Size: {bet_str}\n"
         f"⏳ Pending: {pending}\n"
         f"🔥 Best Streak: {user.get('best_streak', 0)}",
         reply_markup=get_main_reply_keyboard(is_active)
@@ -830,7 +903,7 @@ async def cb_target(callback: types.CallbackQuery):
         f"📌 လက်ရှိ: <b>{user.get('profit_target', 30000):,.0f} Ks</b>\n\n"
         f"👇 <b>ပမာဏကို စာရိုက်ထည့်ပါ:</b>\n"
         f"ဥပမာ: <code>30000</code> or <code>50000</code>\n\n"
-        f"ℹ️ Target ရောက်ရင် Auto-Stop ပါမည်。\n"
+        f"ℹ️ Target ရောက်ရင် Auto-Stop ပါမည်။\n"
         f"Cancel: <code>/cancel</code>"
     )
     await callback.answer()
@@ -860,6 +933,7 @@ async def handle_target_input(message: types.Message):
 async def cmd_cancel(message: types.Message):
     user_id = message.from_user.id
     if user_id in user_target_input: del user_target_input[user_id]
+    if user_id in user_betsize_input: del user_betsize_input[user_id]
     active_users = await db.get_active_users()
     await message.reply("✅ Cancelled.", reply_markup=get_main_reply_keyboard(user_id in active_users))
 
@@ -883,7 +957,7 @@ async def cb_compare(callback: types.CallbackQuery):
     await callback.answer("Comparing...")
     history_docs = await db.get_history(100)
     if len(history_docs) < 20:
-        await callback.message.edit_text("Data မလုံလောက်သေးပါ。"); return
+        await callback.message.edit_text("Data မလုံလောက်သေးပါ။"); return
     test_docs = history_docs[:80]; results = {}
     for mode_key, mode_info in AI_MODES.items():
         correct = total = 0
@@ -936,6 +1010,118 @@ async def cb_process_withdraw(callback: types.CallbackQuery):
     await callback.answer(f"✅ -{amount:,} Ks")
 
 
+# ==========================================
+# 15. BET SIZE HANDLERS
+# ==========================================
+@auth_router.callback_query(lambda c: c.data == "cmd_betsize")
+async def cb_betsize(callback: types.CallbackQuery):
+    """Show Bet Size options"""
+    user_session = await db.get_user_session(callback.from_user.id)
+    current_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
+    current_str = " → ".join([f"{b:,}" for b in current_seq])
+
+    await callback.message.edit_text(
+        f"💲 <b>Bet Size သတ်မှတ်ရန်</b>\n\n"
+        f"📌 လက်ရှိ: <b>{current_str}</b>\n\n"
+        f"👇 Preset ရွေးပါ သို့မဟုတ် Custom ထည့်ပါ:",
+        reply_markup=get_betsize_inline_keyboard(current_seq)
+    )
+    await callback.answer()
+
+
+@auth_router.callback_query(lambda c: c.data and c.data.startswith("setbetsize_"))
+async def cb_set_betsize(callback: types.CallbackQuery):
+    """Process preset bet size selection"""
+    parts = callback.data.replace("setbetsize_", "").split("_")
+    bet_seq = [int(x) for x in parts]
+
+    await db.user_sessions.update_one(
+        {"user_id": callback.from_user.id},
+        {"$set": {"bet_sequence": bet_seq}},
+        upsert=True
+    )
+
+    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
+
+    await callback.message.edit_text(
+        f"✅ <b>Bet Size သတ်မှတ်ပြီး!</b>\n\n"
+        f"💲 Sequence: <b>{bet_str}</b>\n\n"
+        f"🔄 Start Auto-Bet နှိပ်ရင် ဒီ sequence အတိုင်းထိုးပါမည်။",
+        reply_markup=get_settings_inline_keyboard()
+    )
+    await callback.answer(f"✅ Bet Size Updated!")
+
+
+# Bet Size Custom Input State
+user_betsize_input = {}
+
+@auth_router.callback_query(lambda c: c.data == "betsize_custom")
+async def cb_betsize_custom(callback: types.CallbackQuery):
+    """Start custom bet size input"""
+    user_id = callback.from_user.id
+    user_betsize_input[user_id] = True
+
+    user_session = await db.get_user_session(user_id)
+    current_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
+    current_str = " → ".join([f"{b:,}" for b in current_seq])
+
+    await callback.message.edit_text(
+        f"✏️ <b>Custom Bet Size သတ်မှတ်ရန်</b>\n\n"
+        f"📌 လက်ရှိ: <b>{current_str}</b>\n\n"
+        f"👇 <b>အောက်ပါပုံစံအတိုင်း စာရိုက်ထည့်ပါ:</b>\n"
+        f"<code>100-300-900-2700-8100</code>\n\n"
+        f"ℹ️ ဂဏန်းများ dash (-) ခြားပြီးထည့်ပါ။\n"
+        f"Cancel: <code>/cancel</code>"
+    )
+    await callback.answer()
+
+
+@auth_router.message(lambda m: m.text and '-' in m.text and m.from_user.id in user_betsize_input)
+async def handle_betsize_input(message: types.Message):
+    """Process custom bet size input"""
+    user_id = message.from_user.id
+
+    if user_id not in user_betsize_input:
+        return
+
+    try:
+        parts = message.text.strip().split('-')
+        if len(parts) < 2:
+            await message.reply("❌ အနည်းဆုံး ၂ ဆင့်ထည့်ပါ။ ဥပမာ: 100-300")
+            return
+
+        bet_seq = []
+        for p in parts:
+            val = float(p.strip().replace(',', ''))
+            if val <= 0:
+                await message.reply("❌ 0 ထက်ကြီးရပါမည်။")
+                return
+            bet_seq.append(val)
+
+        await db.user_sessions.update_one(
+            {"user_id": user_id},
+            {"$set": {"bet_sequence": bet_seq}},
+            upsert=True
+        )
+
+        del user_betsize_input[user_id]
+
+        bet_str = " → ".join([f"{b:,.0f}" for b in bet_seq])
+
+        active_users = await db.get_active_users()
+        is_active = user_id in active_users
+
+        await message.reply(
+            f"✅ <b>Custom Bet Size သတ်မှတ်ပြီး!</b>\n\n"
+            f"💲 Sequence: <b>{bet_str}</b>\n\n"
+            f"🔄 Start Auto-Bet နှိပ်ရင် ဒီ sequence အတိုင်းထိုးပါမည်။",
+            reply_markup=get_main_reply_keyboard(is_active)
+        )
+
+    except ValueError:
+        await message.reply("❌ ဂဏန်းများသာထည့်ပါ။ ဥပမာ: 100-300-900-2700-8100")
+
+
 @auth_router.callback_query(lambda c: c.data == "cmd_back")
 async def cb_back(callback: types.CallbackQuery):
     user = await db.get_user(callback.from_user.id)
@@ -956,7 +1142,7 @@ async def cb_back(callback: types.CallbackQuery):
 
 
 # ==========================================
-# 15. OWNER ONLY COMMANDS
+# 16. OWNER ONLY COMMANDS
 # ==========================================
 @owner_router.message(Command("addsudo"))
 @owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.addsudo', '/addsudo'])
@@ -993,7 +1179,7 @@ async def cmd_del_sudo(message: types.Message):
 @owner_router.message(Command("give"))
 @owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.give'))
 async def cmd_give_balance(message: types.Message):
-    """Owner မှ User ကို Balance ထည့်ပေးရန် (.give or /give)"""
+    """Owner မှ User ကို Balance ထည့်ပေးရန်"""
     try:
         parts = message.text.split()
         if len(parts) < 3:
@@ -1004,38 +1190,24 @@ async def cmd_give_balance(message: types.Message):
                 "ဥပမာ: <code>.give 123456789 50000</code>"
             )
             return
-        
         target_id = int(parts[1])
         amount = float(parts[2])
-        
         if amount <= 0:
             await message.reply("❌ 0 ထက်ကြီးရပါမည်။")
             return
-        
         receiver = await db.update_balance(target_id, amount, "add")
-        
         await message.reply(
             f"✅ <b>ငွေထည့်ပေးပြီးပါပြီ!</b>\n\n"
             f"👤 User: <code>{target_id}</code>\n"
             f"💵 +{amount:,.0f} Ks\n"
             f"💰 Balance: {receiver['balance']:,.0f} Ks"
         )
-        
         try:
             await bot.send_message(
                 chat_id=target_id,
-                text=(
-                    f"🎁 <b>ငွေထည့်ပေးခြင်းခံရပါသည်!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"💵 +{amount:,.0f} Ks\n"
-                    f"💰 Balance: {receiver['balance']:,.0f} Ks\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"👑 Owner မှ ထည့်ပေးခြင်းဖြစ်ပါသည်။"
-                )
+                text=f"🎁 <b>ငွေထည့်ပေးခြင်းခံရပါသည်!</b>\n━━━━━━━━━━━━━━━━━━\n💵 +{amount:,.0f} Ks\n💰 Balance: {receiver['balance']:,.0f} Ks\n━━━━━━━━━━━━━━━━━━\n👑 Owner မှ ထည့်ပေးခြင်းဖြစ်ပါသည်。"
             )
-        except:
-            pass
-            
+        except: pass
     except ValueError:
         await message.reply("❌ <code>.give [user_id] [amount]</code> ပုံစံဖြင့်ထည့်ပါ။")
 
@@ -1043,7 +1215,7 @@ async def cmd_give_balance(message: types.Message):
 @owner_router.message(Command("take"))
 @owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.take'))
 async def cmd_take_balance(message: types.Message):
-    """Owner မှ User Balance ပြန်နှုတ်ရန် (.take or /take)"""
+    """Owner မှ User Balance ပြန်နှုတ်ရန်"""
     try:
         parts = message.text.split()
         if len(parts) < 3:
@@ -1054,45 +1226,28 @@ async def cmd_take_balance(message: types.Message):
                 "ဥပမာ: <code>.take 123456789 50000</code>"
             )
             return
-        
         target_id = int(parts[1])
         amount = float(parts[2])
-        
         if amount <= 0:
             await message.reply("❌ 0 ထက်ကြီးရပါမည်။")
             return
-        
         user = await db.get_user(target_id)
-        
         if amount > user['balance']:
-            await message.reply(
-                f"❌ လက်ကျန်ငွေ မလုံလောက်ပါ!\n"
-                f"💰 Balance: {user['balance']:,.0f} Ks"
-            )
+            await message.reply(f"❌ လက်ကျန်ငွေ မလုံလောက်ပါ!\n💰 Balance: {user['balance']:,.0f} Ks")
             return
-        
         updated = await db.update_balance(target_id, amount, "subtract")
-        
         await message.reply(
             f"✅ <b>ငွေနှုတ်ပြီးပါပြီ!</b>\n\n"
             f"👤 User: <code>{target_id}</code>\n"
             f"💵 -{amount:,.0f} Ks\n"
             f"💰 Balance: {updated['balance']:,.0f} Ks"
         )
-        
         try:
             await bot.send_message(
                 chat_id=target_id,
-                text=(
-                    f"⚠️ <b>ငွေနှုတ်ယူခြင်းခံရပါသည်!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"💵 -{amount:,.0f} Ks\n"
-                    f"💰 Balance: {updated['balance']:,.0f} Ks"
-                )
+                text=f"⚠️ <b>ငွေနှုတ်ယူခြင်းခံရပါသည်!</b>\n━━━━━━━━━━━━━━━━━━\n💵 -{amount:,.0f} Ks\n💰 Balance: {updated['balance']:,.0f} Ks"
             )
-        except:
-            pass
-            
+        except: pass
     except ValueError:
         await message.reply("❌ <code>.take [user_id] [amount]</code> ပုံစံဖြင့်ထည့်ပါ။")
 
@@ -1100,38 +1255,21 @@ async def cmd_take_balance(message: types.Message):
 @owner_router.message(Command("setbal"))
 @owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.setbal'))
 async def cmd_set_balance(message: types.Message):
-    """Owner မှ User Balance သတ်မှတ်ရန် (.setbal or /setbal)"""
+    """Owner မှ User Balance သတ်မှတ်ရန်"""
     try:
         parts = message.text.split()
-        
         if len(parts) == 2:
-            # Set own balance
             amount = float(parts[1])
-            if amount < 0:
-                await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။")
-                return
+            if amount < 0: await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။"); return
             user = await db.update_balance(message.from_user.id, amount, "set")
-            await message.reply(f"✅ Balance set to: <b>{user['balance']:,.0f} Ks</b>")
-            
+            await message.reply(f"✅ Balance: <b>{user['balance']:,.0f} Ks</b>")
         elif len(parts) == 3:
-            # Set other user's balance
-            target_id = int(parts[1])
-            amount = float(parts[2])
-            if amount < 0:
-                await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။")
-                return
+            target_id = int(parts[1]); amount = float(parts[2])
+            if amount < 0: await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။"); return
             user = await db.update_balance(target_id, amount, "set")
-            await message.reply(
-                f"✅ User <code>{target_id}</code>\n"
-                f"Balance set to: <b>{user['balance']:,.0f} Ks</b>"
-            )
+            await message.reply(f"✅ User <code>{target_id}</code> Balance: <b>{user['balance']:,.0f} Ks</b>")
         else:
-            await message.reply(
-                "❌ <b>အသုံးပြုနည်း:</b>\n"
-                "<code>/setbal 50000</code> or <code>.setbal 50000</code> - ကိုယ့် Balance\n"
-                "<code>/setbal [user_id] 50000</code> or <code>.setbal [user_id] 50000</code> - User Balance"
-            )
-            
+            await message.reply("<code>/setbal 50000</code> or <code>.setbal 50000</code>\n<code>/setbal [id] 50000</code> or <code>.setbal [id] 50000</code>")
     except ValueError:
         await message.reply("❌ ဂဏန်းများသာ ထည့်ပါ။")
 
@@ -1139,19 +1277,15 @@ async def cmd_set_balance(message: types.Message):
 @owner_router.message(Command("sudolist"))
 @owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.sudolist', '/sudolist'])
 async def cmd_sudo_list(message: types.Message):
-    """Show sudo users list"""
     global SUDO_USERS
-    if not SUDO_USERS:
-        await message.reply("📋 No sudo users.")
-        return
+    if not SUDO_USERS: await message.reply("📋 No sudo users."); return
     text = "🛡️ <b>SUDO USERS</b>\n"
-    for i, uid in enumerate(SUDO_USERS, 1):
-        text += f"{i}. <code>{uid}</code>\n"
+    for i, uid in enumerate(SUDO_USERS, 1): text += f"{i}. <code>{uid}</code>\n"
     await message.reply(text)
 
 
 # ==========================================
-# 16. INITIALIZATION & MAIN
+# 17. INITIALIZATION & MAIN
 # ==========================================
 async def init_system():
     global DEFAULT_AI_MODE, SUDO_USERS
@@ -1163,7 +1297,7 @@ async def init_system():
 
 async def main():
     await init_system()
-    print("\n✨ WIN GO AI Bot v4.0 - Reply + Inline Keyboard System\n")
+    print("\n✨ WIN GO AI Bot v4.0 - Full Reset + Bet Size System\n")
     print(f"👑 Owner: {OWNER_ID}")
     print(f"🧠 Default AI: {DEFAULT_AI_MODE}")
     print(f"🛡️ Sudo Users: {len(SUDO_USERS)}\n")
