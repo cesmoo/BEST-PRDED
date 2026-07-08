@@ -77,7 +77,7 @@ def premium_emoji(key, fallback):
 
 
 class Emoji:
-    # Premium Emojis
+    # Premium
     WIN_CHECK = premium_emoji("win_check", "✅")
     LOSE_CROSS = premium_emoji("lose_cross", "❌")
     ORDER = premium_emoji("order", "📝")
@@ -89,8 +89,8 @@ class Emoji:
     CHART_UP = premium_emoji("chart_up", "📈")
     MOMENTUM = premium_emoji("momentum", "📈")
     CHART_DOWN = premium_emoji("chart_down", "📉")
-
-    # Standard Emojis
+    
+    # Standard
     CHECK = "✅"
     CROSS = "❌"
     WARNING = "⚠️"
@@ -139,6 +139,17 @@ class Emoji:
     SUDO = "🛡️"
     USER = "👤"
     BANNED = "🚫"
+    
+    # Reply Keyboard Icons (ဒီတွေမရှိလို့ error တက်တာ)
+    SETTINGS = "⚙️"
+    TARGET = "🎯"
+    HISTORY = "📋"
+    PLAY = "▶️"
+    STOP = "⏹️"
+    REFRESH = "🔄"
+    BACK = "🔙"
+    MENU = "📋"
+    CHART = "📊"
 
 # ==========================================
 # 3. SYSTEM VARIABLES
