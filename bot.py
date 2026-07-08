@@ -409,7 +409,7 @@ async def send_bet_result_notification(user_id, bet, actual_size, actual_number,
                 f"{Emoji.BULLSEYE if actual_size == 'BIG' else Emoji.GREEN_CIRCLE} "
                 f"{actual_size} {color}\n"
                 f"{Emoji.MONEY_ICON} <b>Balance:</b> {user['balance']:,.2f} Ks\n"
-                f"{Emoji.CHART_UP} <b>Session Profit:</b> +{session_profit:,.2f} Ks"
+                f"{Emoji.CHART_UP} <b>Profit:</b> +{session_profit:,.2f} Ks"
             )
         else:
             message = (
@@ -420,7 +420,7 @@ async def send_bet_result_notification(user_id, bet, actual_size, actual_number,
                 f"{Emoji.BULLSEYE if actual_size == 'BIG' else Emoji.GREEN_CIRCLE} "
                 f"{actual_size} {color}\n"
                 f"{Emoji.MONEY_ICON} <b>Balance:</b> {user['balance']:,.2f} Ks\n"
-                f"{Emoji.LOSS_ICON} <b>Session Profit:</b> {session_profit:,.2f} Ks"
+                f"{Emoji.LOSS_ICON} <b>Profit:</b> {session_profit:,.2f} Ks"
             )
 
         await bot.send_message(
@@ -546,7 +546,7 @@ async def check_game_and_predict(session: aiohttp.ClientSession):
                             if result["success"]:
                                 ai_name = AI_MODES.get(user_ai_mode, {}).get("name", "AI")
                                 order_msg = (
-                                    f"{Emoji.ORDER} <b>Order Placed!</b>\n"
+                                    #f"{Emoji.ORDER} <b>Order Placed!</b>\n"
                                     f"{Emoji.GAME_ICON} WINGO_30S: <code>{next_issue}</code>\n"
                                     f"{Emoji.CHART_ICON} {predicted_size} | {bet_amount:,.0f} Ks\n"
                                     f"{Emoji.BRAIN} {ai_name}"
