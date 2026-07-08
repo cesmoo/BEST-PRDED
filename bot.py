@@ -959,27 +959,195 @@ async def cb_back(callback: types.CallbackQuery):
 # 15. OWNER ONLY COMMANDS
 # ==========================================
 @owner_router.message(Command("addsudo"))
+@owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.addsudo', '/addsudo'])
 async def cmd_add_sudo(message: types.Message):
     try:
         parts = message.text.split()
-        if len(parts) < 2: await message.reply("/addsudo [user_id]"); return
+        if len(parts) < 2:
+            await message.reply("<code>/addsudo [user_id]</code> or <code>.addsudo [user_id]</code>")
+            return
         target_id = int(parts[1])
         await db.add_sudo(target_id, message.from_user.id)
         global SUDO_USERS; SUDO_USERS = await db.get_sudo_users()
         await message.reply(f"✅ Sudo Added: <code>{target_id}</code>")
-    except ValueError: await message.reply("User ID ဂဏန်းသာထည့်ပါ။")
+    except ValueError:
+        await message.reply("❌ User ID ဂဏန်းသာထည့်ပါ။")
 
 
 @owner_router.message(Command("delsudo"))
+@owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.delsudo', '/delsudo'])
 async def cmd_del_sudo(message: types.Message):
     try:
         parts = message.text.split()
-        if len(parts) < 2: await message.reply("/delsudo [user_id]"); return
+        if len(parts) < 2:
+            await message.reply("<code>/delsudo [user_id]</code> or <code>.delsudo [user_id]</code>")
+            return
         target_id = int(parts[1])
         await db.remove_sudo(target_id)
         global SUDO_USERS; SUDO_USERS = await db.get_sudo_users()
         await message.reply(f"✅ Sudo Removed: <code>{target_id}</code>")
-    except ValueError: await message.reply("User ID ဂဏန်းသာထည့်ပါ။")
+    except ValueError:
+        await message.reply("❌ User ID ဂဏန်းသာထည့်ပါ။")
+
+
+@owner_router.message(Command("give"))
+@owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.give'))
+async def cmd_give_balance(message: types.Message):
+    """Owner မှ User ကို Balance ထည့်ပေးရန် (.give or /give)"""
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+            await message.reply(
+                "❌ <b>အသုံးပြုနည်း:</b>\n"
+                "<code>/give [user_id] [amount]</code>\n"
+                "<code>.give [user_id] [amount]</code>\n\n"
+                "ဥပမာ: <code>.give 123456789 50000</code>"
+            )
+            return
+        
+        target_id = int(parts[1])
+        amount = float(parts[2])
+        
+        if amount <= 0:
+            await message.reply("❌ 0 ထက်ကြီးရပါမည်။")
+            return
+        
+        receiver = await db.update_balance(target_id, amount, "add")
+        
+        await message.reply(
+            f"✅ <b>ငွေထည့်ပေးပြီးပါပြီ!</b>\n\n"
+            f"👤 User: <code>{target_id}</code>\n"
+            f"💵 +{amount:,.0f} Ks\n"
+            f"💰 Balance: {receiver['balance']:,.0f} Ks"
+        )
+        
+        try:
+            await bot.send_message(
+                chat_id=target_id,
+                text=(
+                    f"🎁 <b>ငွေထည့်ပေးခြင်းခံရပါသည်!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💵 +{amount:,.0f} Ks\n"
+                    f"💰 Balance: {receiver['balance']:,.0f} Ks\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"👑 Owner မှ ထည့်ပေးခြင်းဖြစ်ပါသည်။"
+                )
+            )
+        except:
+            pass
+            
+    except ValueError:
+        await message.reply("❌ <code>.give [user_id] [amount]</code> ပုံစံဖြင့်ထည့်ပါ။")
+
+
+@owner_router.message(Command("take"))
+@owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.take'))
+async def cmd_take_balance(message: types.Message):
+    """Owner မှ User Balance ပြန်နှုတ်ရန် (.take or /take)"""
+    try:
+        parts = message.text.split()
+        if len(parts) < 3:
+            await message.reply(
+                "❌ <b>အသုံးပြုနည်း:</b>\n"
+                "<code>/take [user_id] [amount]</code>\n"
+                "<code>.take [user_id] [amount]</code>\n\n"
+                "ဥပမာ: <code>.take 123456789 50000</code>"
+            )
+            return
+        
+        target_id = int(parts[1])
+        amount = float(parts[2])
+        
+        if amount <= 0:
+            await message.reply("❌ 0 ထက်ကြီးရပါမည်။")
+            return
+        
+        user = await db.get_user(target_id)
+        
+        if amount > user['balance']:
+            await message.reply(
+                f"❌ လက်ကျန်ငွေ မလုံလောက်ပါ!\n"
+                f"💰 Balance: {user['balance']:,.0f} Ks"
+            )
+            return
+        
+        updated = await db.update_balance(target_id, amount, "subtract")
+        
+        await message.reply(
+            f"✅ <b>ငွေနှုတ်ပြီးပါပြီ!</b>\n\n"
+            f"👤 User: <code>{target_id}</code>\n"
+            f"💵 -{amount:,.0f} Ks\n"
+            f"💰 Balance: {updated['balance']:,.0f} Ks"
+        )
+        
+        try:
+            await bot.send_message(
+                chat_id=target_id,
+                text=(
+                    f"⚠️ <b>ငွေနှုတ်ယူခြင်းခံရပါသည်!</b>\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"💵 -{amount:,.0f} Ks\n"
+                    f"💰 Balance: {updated['balance']:,.0f} Ks"
+                )
+            )
+        except:
+            pass
+            
+    except ValueError:
+        await message.reply("❌ <code>.take [user_id] [amount]</code> ပုံစံဖြင့်ထည့်ပါ။")
+
+
+@owner_router.message(Command("setbal"))
+@owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.setbal'))
+async def cmd_set_balance(message: types.Message):
+    """Owner မှ User Balance သတ်မှတ်ရန် (.setbal or /setbal)"""
+    try:
+        parts = message.text.split()
+        
+        if len(parts) == 2:
+            # Set own balance
+            amount = float(parts[1])
+            if amount < 0:
+                await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။")
+                return
+            user = await db.update_balance(message.from_user.id, amount, "set")
+            await message.reply(f"✅ Balance set to: <b>{user['balance']:,.0f} Ks</b>")
+            
+        elif len(parts) == 3:
+            # Set other user's balance
+            target_id = int(parts[1])
+            amount = float(parts[2])
+            if amount < 0:
+                await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။")
+                return
+            user = await db.update_balance(target_id, amount, "set")
+            await message.reply(
+                f"✅ User <code>{target_id}</code>\n"
+                f"Balance set to: <b>{user['balance']:,.0f} Ks</b>"
+            )
+        else:
+            await message.reply(
+                "❌ <b>အသုံးပြုနည်း:</b>\n"
+                "<code>/setbal 50000</code> or <code>.setbal 50000</code> - ကိုယ့် Balance\n"
+                "<code>/setbal [user_id] 50000</code> or <code>.setbal [user_id] 50000</code> - User Balance"
+            )
+            
+    except ValueError:
+        await message.reply("❌ ဂဏန်းများသာ ထည့်ပါ။")
+
+
+@owner_router.message(Command("sudolist"))
+@owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.sudolist', '/sudolist'])
+async def cmd_sudo_list(message: types.Message):
+    """Show sudo users list"""
+    global SUDO_USERS
+    if not SUDO_USERS:
+        await message.reply("📋 No sudo users.")
+        return
+    text = "🛡️ <b>SUDO USERS</b>\n"
+    for i, uid in enumerate(SUDO_USERS, 1):
+        text += f"{i}. <code>{uid}</code>\n"
+    await message.reply(text)
 
 
 # ==========================================
