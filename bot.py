@@ -150,6 +150,9 @@ SESSION_START_ISSUE = None
 DEFAULT_AI_MODE = "ensemble"
 SUDO_USERS = set()
 
+# Default Bet Sequence (6 ဆင့်)
+DEFAULT_BET_SEQUENCE = [100, 300, 900, 2700, 8100, 24300]
+
 BASE_HEADERS = {
     'authority': 'api.bigwinqaz.com',
     'accept': 'application/json, text/plain, */*',
@@ -322,20 +325,20 @@ def get_betsize_inline_keyboard(current_seq: list) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
 
     builder.row(InlineKeyboardButton(
-        text="💰 100-300-900-2700-8100 (Default)",
+        text="💰 100-300-900-2700-8100-24300 (6 Steps - Default)",
+        callback_data="setbetsize_100_300_900_2700_8100_24300"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="💰 100-300-900-2700-8100 (5 Steps)",
         callback_data="setbetsize_100_300_900_2700_8100"
     ))
     builder.row(InlineKeyboardButton(
-        text="💰 50-150-450-1350-4050 (Small)",
-        callback_data="setbetsize_50_150_450_1350_4050"
+        text="💰 50-150-450-1350-4050-12150 (Small 6 Steps)",
+        callback_data="setbetsize_50_150_450_1350_4050_12150"
     ))
     builder.row(InlineKeyboardButton(
-        text="💰 200-600-1800-5400-16200 (Medium)",
-        callback_data="setbetsize_200_600_1800_5400_16200"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="💰 500-1500-4500-13500-40500 (Large)",
-        callback_data="setbetsize_500_1500_4500_13500_40500"
+        text="💰 200-600-1800-5400-16200-48600 (Medium 6 Steps)",
+        callback_data="setbetsize_200_600_1800_5400_16200_48600"
     ))
     builder.row(InlineKeyboardButton(
         text="✏️ Custom Bet Size (စာရိုက်ထည့်ရန်)",
@@ -498,6 +501,7 @@ async def check_game_and_predict(session: aiohttp.ClientSession):
 
                 await db.add_history(latest_issue, latest_number, latest_size)
 
+                # Settle bets and send notifications
                 settled_bets = await db.settle_bets(latest_issue, latest_size, latest_number)
                 for bet in settled_bets:
                     is_win = bet["result"] == "WIN"
@@ -523,21 +527,34 @@ async def check_game_and_predict(session: aiohttp.ClientSession):
                         user_session = await db.get_user_session(user_id)
                         user_ai_mode = user_session.get("ai_mode", DEFAULT_AI_MODE)
 
+                        # Get prediction using user's AI mode
                         predicted_size, predicted_display, final_prob, reason = get_prediction(
                             history_docs, user_ai_mode
                         )
                         await db.save_prediction(next_issue, predicted_size, user_ai_mode)
 
-                        recent_bets = await db.get_user_bets(user_id, 10)
+                        # ========== LOSE STREAK WITH AUTO RESET ==========
+                        # Get recent bets to calculate lose streak
+                        recent_bets = await db.get_user_bets(user_id, 30)
+
                         lose_streak = 0
                         for bet in recent_bets:
                             if bet.get("result") == "LOSE":
                                 lose_streak += 1
-                            else:
-                                break
+                            elif bet.get("result") == "WIN":
+                                break  # WIN တွေ့ရင် streak ပြတ် (reset)
 
-                        bet_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
-                        bet_amount = bet_seq[min(lose_streak, len(bet_seq) - 1)]
+                        # Get user's bet sequence (default 6 steps)
+                        bet_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
+
+                        # If lose streak >= sequence length, reset to 0 (back to first bet)
+                        if lose_streak >= len(bet_seq):
+                            print(f"🔄 User {user_id}: Streak reset! {lose_streak} losses (max {len(bet_seq)}), back to {bet_seq[0]}")
+                            lose_streak = 0
+
+                        # Get bet amount based on current lose streak
+                        bet_amount = bet_seq[lose_streak]
+                        # =====================================================
 
                         if user["balance"] >= bet_amount:
                             result = await db.place_bet(
@@ -545,10 +562,17 @@ async def check_game_and_predict(session: aiohttp.ClientSession):
                             )
                             if result["success"]:
                                 ai_name = AI_MODES.get(user_ai_mode, {}).get("name", "AI")
+
+                                # Show streak info
+                                if lose_streak > 0:
+                                    streak_info = f" | 📉 Streak: {lose_streak}/{len(bet_seq)}"
+                                else:
+                                    streak_info = ""
+
                                 order_msg = (
-                                    #f"{Emoji.ORDER} <b>Order Placed!</b>\n"
+                                   # f"{Emoji.ORDER} <b>Order Placed!</b>\n"
                                     f"{Emoji.GAME_ICON} WINGO_30S: <code>{next_issue}</code>\n"
-                                    f"{Emoji.CHART_ICON} {predicted_size} | {bet_amount:,.0f} Ks\n"
+                                    f"{Emoji.CHART_ICON} {predicted_size} | {bet_amount:,.0f} Ks{streak_info}\n"
                                     f"{Emoji.BRAIN} {ai_name}"
                                 )
                                 await bot.send_message(
@@ -626,11 +650,14 @@ def generate_chart(predictions):
 
     for i, p in enumerate(latest_preds):
         if 'WIN' in p.get('win_lose', ''):
-            wins += 1; bar_colors.append('#00e5ff')
+            wins += 1
+            bar_colors.append('#00e5ff')
         else:
-            losses += 1; bar_colors.append('#ff4444')
+            losses += 1
+            bar_colors.append('#ff4444')
         current_wr = (wins / (i + 1)) * 100
-        bar_heights.append(current_wr); history_wr.append(current_wr)
+        bar_heights.append(current_wr)
+        history_wr.append(current_wr)
 
     total_played = wins + losses
     win_rate = int((wins / total_played * 100)) if total_played > 0 else 0
@@ -639,7 +666,9 @@ def generate_chart(predictions):
     fig.text(0.05, 0.93, "🏆 WIN GO PERFORMANCE", color='#ffffff', fontsize=26, fontweight='bold', ha='left')
 
     ax_circle = fig.add_axes([0.08, 0.42, 0.35, 0.40])
-    ax_circle.set_axis_off(); ax_circle.set_xlim(0, 1); ax_circle.set_ylim(0, 1)
+    ax_circle.set_axis_off()
+    ax_circle.set_xlim(0, 1)
+    ax_circle.set_ylim(0, 1)
     theta_bg = np.linspace(-1.25 * np.pi, 0.25 * np.pi, 200)
     ax_circle.plot(0.5 + 0.45 * np.cos(theta_bg), 0.5 + 0.45 * np.sin(theta_bg), color='#2c313c', linewidth=12)
     if win_rate > 0:
@@ -650,8 +679,11 @@ def generate_chart(predictions):
     ax_circle.text(0.5, 0.48, f"{win_rate}%", color='#00e5ff', fontsize=65, fontweight='bold', ha='center')
 
     ax_bar = fig.add_axes([0.55, 0.47, 0.38, 0.33])
-    ax_bar.set_facecolor('#1c1f26'); ax_bar.set_xlim(-0.5, 19.5); ax_bar.set_ylim(0, 105)
-    for spine in ax_bar.spines.values(): spine.set_visible(False)
+    ax_bar.set_facecolor('#1c1f26')
+    ax_bar.set_xlim(-0.5, 19.5)
+    ax_bar.set_ylim(0, 105)
+    for spine in ax_bar.spines.values():
+        spine.set_visible(False)
     ax_bar.set_yticks([0, 25, 50, 75, 100])
     ax_bar.set_yticklabels(['0%', '25%', '50%', '75%', '100%'], color='#7a8294', fontsize=10)
     ax_bar.grid(axis='y', color='#2c313c', linewidth=1.5)
@@ -664,13 +696,15 @@ def generate_chart(predictions):
     ax_bar.set_xticks(np.arange(20))
     ax_bar.set_xticklabels([str(i + 1) for i in range(20)], color='#7a8294', fontsize=10)
 
-    ax_win = fig.add_axes([0.05, 0.22, 0.28, 0.16]); ax_win.set_axis_off()
+    ax_win = fig.add_axes([0.05, 0.22, 0.28, 0.16])
+    ax_win.set_axis_off()
     rect_win = patches.FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0,rounding_size=0.1", fc="#1de9b6")
     ax_win.add_patch(rect_win)
     ax_win.text(0.1, 0.75, "WINS", color='#004d40', fontsize=16, fontweight='bold')
     ax_win.text(0.1, 0.35, f"{wins}", color='#000000', fontsize=48, fontweight='bold')
 
-    ax_lose = fig.add_axes([0.35, 0.22, 0.28, 0.16]); ax_lose.set_axis_off()
+    ax_lose = fig.add_axes([0.35, 0.22, 0.28, 0.16])
+    ax_lose.set_axis_off()
     rect_lose = patches.FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0,rounding_size=0.1", fc="#ef5350")
     ax_lose.add_patch(rect_lose)
     ax_lose.text(0.1, 0.75, "LOSSES", color='#4d0000', fontsize=16, fontweight='bold')
@@ -678,7 +712,8 @@ def generate_chart(predictions):
 
     buf = io.BytesIO()
     plt.savefig(buf, format='png', dpi=100, facecolor='#1c1f26')
-    buf.seek(0); plt.close(fig)
+    buf.seek(0)
+    plt.close(fig)
     return buf
 
 
@@ -687,20 +722,24 @@ def generate_chart(predictions):
 # ==========================================
 async def auto_broadcaster():
     await db.init_indexes()
-    global SUDO_USERS; SUDO_USERS = await db.get_sudo_users()
+    global SUDO_USERS
+    SUDO_USERS = await db.get_sudo_users()
     print(f"✅ DB Connected | 🛡️ Sudo: {len(SUDO_USERS)}")
 
     async with aiohttp.ClientSession() as session:
         await login_and_get_token(session)
         while True:
-            current_time = time.time(); sec_passed = int(current_time) % 30
+            current_time = time.time()
+            sec_passed = int(current_time) % 30
             active_users = await db.get_active_users()
             if active_users and 5 <= sec_passed <= 28:
                 try:
                     is_processed = await check_game_and_predict(session)
                     if is_processed:
-                        await asyncio.sleep(30 - (int(time.time()) % 30)); continue
-                except Exception as e: print(f"Scheduler error: {e}")
+                        await asyncio.sleep(30 - (int(time.time()) % 30))
+                        continue
+                except Exception as e:
+                    print(f"Scheduler error: {e}")
             await asyncio.sleep(0.5)
 
 
@@ -716,6 +755,9 @@ async def cmd_start(message: types.Message):
     user_session = await db.get_user_session(message.from_user.id)
     user_ai_mode = user_session.get("ai_mode", DEFAULT_AI_MODE)
 
+    bet_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
+    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
+
     await message.reply(
         f"{Emoji.SPARKLES} <b>WIN GO AI Bot v4.0</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
@@ -723,7 +765,8 @@ async def cmd_start(message: types.Message):
         f"{Emoji.MONEY_ICON} <b>Balance:</b> {user['balance']:,.0f} Ks\n"
         f"🟢 <b>Status:</b> {'Active' if is_active else 'Inactive'}\n"
         f"{Emoji.BRAIN} <b>Your AI:</b> {AI_MODES.get(user_ai_mode, {}).get('name', 'AI')}\n"
-        f"🎯 <b>Target:</b> {user.get('profit_target', 30000):,.0f} Ks\n\n"
+        f"🎯 <b>Target:</b> {user.get('profit_target', 30000):,.0f} Ks\n"
+        f"💲 <b>Bet Size:</b> {bet_str}\n\n"
         f"👇 <b>အောက်က Keyboard ကိုသုံးပါ:</b>",
         reply_markup=get_main_reply_keyboard(is_active)
     )
@@ -756,15 +799,15 @@ async def handle_start_button(message: types.Message):
     await db.activate_session(user_id, user_session.get("ai_mode", DEFAULT_AI_MODE))
 
     user = await db.get_user(user_id)
-    bet_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
-    bet_seq_str = " → ".join([f"{b:,}" for b in bet_seq])
+    bet_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
+    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
 
     await message.reply(
         f"✅ <b>Auto-Bet Activated!</b>\n\n"
         f"💰 Balance: {user['balance']:,.0f} Ks\n"
         f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n"
-        f"💲 Bet Size: {bet_seq_str}\n"
-        f"🔄 Session Reset Complete!\n\n"
+        f"💲 Bet Size: {bet_str}\n"
+        f"🔄 Session Reset Complete! (Starting from {bet_seq[0]:,})\n\n"
         f"👇 Keyboard ကိုသုံးပါ:",
         reply_markup=get_main_reply_keyboard(True)
     )
@@ -834,8 +877,17 @@ async def handle_status_button(message: types.Message):
     user_session = await db.get_user_session(message.from_user.id)
     pending = await db.get_pending_bets_count(message.from_user.id)
 
-    bet_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
+    bet_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
     bet_str = " → ".join([f"{b:,}" for b in bet_seq])
+
+    # Calculate current lose streak
+    recent_bets = await db.get_user_bets(message.from_user.id, 20)
+    lose_streak = 0
+    for bet in recent_bets:
+        if bet.get("result") == "LOSE":
+            lose_streak += 1
+        elif bet.get("result") == "WIN":
+            break
 
     await message.reply(
         f"📊 <b>သင့် Status</b>\n"
@@ -846,6 +898,7 @@ async def handle_status_button(message: types.Message):
         f"📈 Session Profit: {user['session_profit']:,.2f} Ks\n"
         f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n"
         f"💲 Bet Size: {bet_str}\n"
+        f"📉 Current Streak: {lose_streak}/{len(bet_seq)}\n"
         f"⏳ Pending: {pending}\n"
         f"🔥 Best Streak: {user.get('best_streak', 0)}",
         reply_markup=get_main_reply_keyboard(is_active)
@@ -868,11 +921,15 @@ async def handle_mybets_button(message: types.Message):
     text = "📋 <b>မှတ်တမ်း</b>\n"
     if bets:
         for bet in bets:
-            if bet["result"] is None: status = "⏳"
-            elif bet["result"] == "WIN": status = f"✅ +{bet['profit']:,.0f}"
-            else: status = f"❌ -{bet['bet_amount']:,.0f}"
+            if bet["result"] is None:
+                status = "⏳"
+            elif bet["result"] == "WIN":
+                status = f"✅ +{bet['profit']:,.0f}"
+            else:
+                status = f"❌ -{bet['bet_amount']:,.0f}"
             text += f"{bet['issue_number']}: {bet['bet_amount']:,.0f}K {bet['predicted_size']} → {status}\n"
-    else: text += "မရှိသေးပါ"
+    else:
+        text += "မရှိသေးပါ"
     await message.reply(text, reply_markup=get_main_reply_keyboard(is_active))
 
 
@@ -912,11 +969,13 @@ async def cb_target(callback: types.CallbackQuery):
 @auth_router.message(lambda m: m.text and m.text.strip().isdigit() and m.from_user.id in user_target_input)
 async def handle_target_input(message: types.Message):
     user_id = message.from_user.id
-    if user_id not in user_target_input: return
+    if user_id not in user_target_input:
+        return
     try:
         target = float(message.text.strip())
         if target <= 0:
-            await message.reply("❌ 0 ထက်ကြီးရပါမည်။", reply_markup=get_main_reply_keyboard(False)); return
+            await message.reply("❌ 0 ထက်ကြီးရပါမည်။", reply_markup=get_main_reply_keyboard(False))
+            return
         await db.update_profit_target(user_id, target)
         del user_target_input[user_id]
         active_users = await db.get_active_users()
@@ -932,8 +991,10 @@ async def handle_target_input(message: types.Message):
 @auth_router.message(Command("cancel"))
 async def cmd_cancel(message: types.Message):
     user_id = message.from_user.id
-    if user_id in user_target_input: del user_target_input[user_id]
-    if user_id in user_betsize_input: del user_betsize_input[user_id]
+    if user_id in user_target_input:
+        del user_target_input[user_id]
+    if user_id in user_betsize_input:
+        del user_betsize_input[user_id]
     active_users = await db.get_active_users()
     await message.reply("✅ Cancelled.", reply_markup=get_main_reply_keyboard(user_id in active_users))
 
@@ -957,8 +1018,10 @@ async def cb_compare(callback: types.CallbackQuery):
     await callback.answer("Comparing...")
     history_docs = await db.get_history(100)
     if len(history_docs) < 20:
-        await callback.message.edit_text("Data မလုံလောက်သေးပါ။"); return
-    test_docs = history_docs[:80]; results = {}
+        await callback.message.edit_text("Data မလုံလောက်သေးပါ။")
+        return
+    test_docs = history_docs[:80]
+    results = {}
     for mode_key, mode_info in AI_MODES.items():
         correct = total = 0
         for i in range(len(test_docs) - 10):
@@ -966,9 +1029,11 @@ async def cb_compare(callback: types.CallbackQuery):
             if len(segment) >= 10:
                 try:
                     pred_size, _, _, _ = mode_info["func"](segment)
-                    if pred_size == test_docs[i].get("size", "BIG"): correct += 1
+                    if pred_size == test_docs[i].get("size", "BIG"):
+                        correct += 1
                     total += 1
-                except: pass
+                except:
+                    pass
         results[mode_key] = {"name": mode_info["name"], "accuracy": (correct / total * 100) if total > 0 else 0}
     sorted_results = sorted(results.items(), key=lambda x: x[1]["accuracy"], reverse=True)
     text = "📊 <b>AI COMPARISON (Top 5)</b>\n"
@@ -1003,7 +1068,9 @@ async def cb_process_withdraw(callback: types.CallbackQuery):
     data = callback.data.replace("withdraw_", "")
     user = await db.get_user(callback.from_user.id)
     amount = user['balance'] if data == "all" else float(data)
-    if amount > user['balance']: await callback.answer("Not enough!", show_alert=True); return
+    if amount > user['balance']:
+        await callback.answer("Not enough!", show_alert=True)
+        return
     await db.update_balance(callback.from_user.id, amount, "subtract")
     updated = await db.get_user(callback.from_user.id)
     await callback.message.edit_text(f"✅ -{amount:,.0f} Ks\n💰 Balance: {updated['balance']:,.0f} Ks")
@@ -1017,12 +1084,12 @@ async def cb_process_withdraw(callback: types.CallbackQuery):
 async def cb_betsize(callback: types.CallbackQuery):
     """Show Bet Size options"""
     user_session = await db.get_user_session(callback.from_user.id)
-    current_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
+    current_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
     current_str = " → ".join([f"{b:,}" for b in current_seq])
 
     await callback.message.edit_text(
         f"💲 <b>Bet Size သတ်မှတ်ရန်</b>\n\n"
-        f"📌 လက်ရှိ: <b>{current_str}</b>\n\n"
+        f"📌 လက်ရှိ: <b>{current_str}</b> ({len(current_seq)} ဆင့်)\n\n"
         f"👇 Preset ရွေးပါ သို့မဟုတ် Custom ထည့်ပါ:",
         reply_markup=get_betsize_inline_keyboard(current_seq)
     )
@@ -1045,11 +1112,11 @@ async def cb_set_betsize(callback: types.CallbackQuery):
 
     await callback.message.edit_text(
         f"✅ <b>Bet Size သတ်မှတ်ပြီး!</b>\n\n"
-        f"💲 Sequence: <b>{bet_str}</b>\n\n"
-        f"🔄 Start Auto-Bet နှိပ်ရင် ဒီ sequence အတိုင်းထိုးပါမည်။",
+        f"💲 Sequence ({len(bet_seq)} ဆင့်): <b>{bet_str}</b>\n\n"
+        f"🔄 နောက်ဆုံးအဆင့် ({bet_seq[-1]:,}) ထိရှုံးရင် {bet_seq[0]:,} ကနေ Auto Reset ပါမည်။",
         reply_markup=get_settings_inline_keyboard()
     )
-    await callback.answer(f"✅ Bet Size Updated!")
+    await callback.answer(f"✅ Bet Size Updated! ({len(bet_seq)} steps)")
 
 
 # Bet Size Custom Input State
@@ -1062,15 +1129,16 @@ async def cb_betsize_custom(callback: types.CallbackQuery):
     user_betsize_input[user_id] = True
 
     user_session = await db.get_user_session(user_id)
-    current_seq = user_session.get("bet_sequence", [100, 300, 900, 2700, 8100])
+    current_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
     current_str = " → ".join([f"{b:,}" for b in current_seq])
 
     await callback.message.edit_text(
         f"✏️ <b>Custom Bet Size သတ်မှတ်ရန်</b>\n\n"
-        f"📌 လက်ရှိ: <b>{current_str}</b>\n\n"
+        f"📌 လက်ရှိ ({len(current_seq)} ဆင့်): <b>{current_str}</b>\n\n"
         f"👇 <b>အောက်ပါပုံစံအတိုင်း စာရိုက်ထည့်ပါ:</b>\n"
-        f"<code>100-300-900-2700-8100</code>\n\n"
+        f"<code>100-300-900-2700-8100-24300</code>\n\n"
         f"ℹ️ ဂဏန်းများ dash (-) ခြားပြီးထည့်ပါ။\n"
+        f"ℹ️ နောက်ဆုံးအဆင့်ထိရှုံးရင် ပထမအဆင့်ကနေ Auto Reset ပါမည်။\n"
         f"Cancel: <code>/cancel</code>"
     )
     await callback.answer()
@@ -1113,13 +1181,13 @@ async def handle_betsize_input(message: types.Message):
 
         await message.reply(
             f"✅ <b>Custom Bet Size သတ်မှတ်ပြီး!</b>\n\n"
-            f"💲 Sequence: <b>{bet_str}</b>\n\n"
-            f"🔄 Start Auto-Bet နှိပ်ရင် ဒီ sequence အတိုင်းထိုးပါမည်။",
+            f"💲 Sequence ({len(bet_seq)} ဆင့်): <b>{bet_str}</b>\n\n"
+            f"🔄 နောက်ဆုံးအဆင့် ({bet_seq[-1]:,.0f}) ထိရှုံးရင် {bet_seq[0]:,.0f} ကနေ Auto Reset ပါမည်။",
             reply_markup=get_main_reply_keyboard(is_active)
         )
 
     except ValueError:
-        await message.reply("❌ ဂဏန်းများသာထည့်ပါ။ ဥပမာ: 100-300-900-2700-8100")
+        await message.reply("❌ ဂဏန်းများသာထည့်ပါ။ ဥပမာ: 100-300-900-2700-8100-24300")
 
 
 @auth_router.callback_query(lambda c: c.data == "cmd_back")
@@ -1154,7 +1222,8 @@ async def cmd_add_sudo(message: types.Message):
             return
         target_id = int(parts[1])
         await db.add_sudo(target_id, message.from_user.id)
-        global SUDO_USERS; SUDO_USERS = await db.get_sudo_users()
+        global SUDO_USERS
+        SUDO_USERS = await db.get_sudo_users()
         await message.reply(f"✅ Sudo Added: <code>{target_id}</code>")
     except ValueError:
         await message.reply("❌ User ID ဂဏန်းသာထည့်ပါ။")
@@ -1170,7 +1239,8 @@ async def cmd_del_sudo(message: types.Message):
             return
         target_id = int(parts[1])
         await db.remove_sudo(target_id)
-        global SUDO_USERS; SUDO_USERS = await db.get_sudo_users()
+        global SUDO_USERS
+        SUDO_USERS = await db.get_sudo_users()
         await message.reply(f"✅ Sudo Removed: <code>{target_id}</code>")
     except ValueError:
         await message.reply("❌ User ID ဂဏန်းသာထည့်ပါ။")
@@ -1205,9 +1275,10 @@ async def cmd_give_balance(message: types.Message):
         try:
             await bot.send_message(
                 chat_id=target_id,
-                text=f"🎁 <b>ငွေထည့်ပေးခြင်းခံရပါသည်!</b>\n━━━━━━━━━━━━━━━━━━\n💵 +{amount:,.0f} Ks\n💰 Balance: {receiver['balance']:,.0f} Ks\n━━━━━━━━━━━━━━━━━━\n👑 Owner မှ ထည့်ပေးခြင်းဖြစ်ပါသည်。"
+                text=f"🎁 <b>ငွေထည့်ပေးခြင်းခံရပါသည်!</b>\n━━━━━━━━━━━━━━━━━━\n💵 +{amount:,.0f} Ks\n💰 Balance: {receiver['balance']:,.0f} Ks\n━━━━━━━━━━━━━━━━━━\n👑 Owner မှ ထည့်ပေးခြင်းဖြစ်ပါသည်။"
             )
-        except: pass
+        except:
+            pass
     except ValueError:
         await message.reply("❌ <code>.give [user_id] [amount]</code> ပုံစံဖြင့်ထည့်ပါ။")
 
@@ -1247,7 +1318,8 @@ async def cmd_take_balance(message: types.Message):
                 chat_id=target_id,
                 text=f"⚠️ <b>ငွေနှုတ်ယူခြင်းခံရပါသည်!</b>\n━━━━━━━━━━━━━━━━━━\n💵 -{amount:,.0f} Ks\n💰 Balance: {updated['balance']:,.0f} Ks"
             )
-        except: pass
+        except:
+            pass
     except ValueError:
         await message.reply("❌ <code>.take [user_id] [amount]</code> ပုံစံဖြင့်ထည့်ပါ။")
 
@@ -1260,12 +1332,17 @@ async def cmd_set_balance(message: types.Message):
         parts = message.text.split()
         if len(parts) == 2:
             amount = float(parts[1])
-            if amount < 0: await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။"); return
+            if amount < 0:
+                await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။")
+                return
             user = await db.update_balance(message.from_user.id, amount, "set")
             await message.reply(f"✅ Balance: <b>{user['balance']:,.0f} Ks</b>")
         elif len(parts) == 3:
-            target_id = int(parts[1]); amount = float(parts[2])
-            if amount < 0: await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။"); return
+            target_id = int(parts[1])
+            amount = float(parts[2])
+            if amount < 0:
+                await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။")
+                return
             user = await db.update_balance(target_id, amount, "set")
             await message.reply(f"✅ User <code>{target_id}</code> Balance: <b>{user['balance']:,.0f} Ks</b>")
         else:
@@ -1278,9 +1355,12 @@ async def cmd_set_balance(message: types.Message):
 @owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.sudolist', '/sudolist'])
 async def cmd_sudo_list(message: types.Message):
     global SUDO_USERS
-    if not SUDO_USERS: await message.reply("📋 No sudo users."); return
+    if not SUDO_USERS:
+        await message.reply("📋 No sudo users.")
+        return
     text = "🛡️ <b>SUDO USERS</b>\n"
-    for i, uid in enumerate(SUDO_USERS, 1): text += f"{i}. <code>{uid}</code>\n"
+    for i, uid in enumerate(SUDO_USERS, 1):
+        text += f"{i}. <code>{uid}</code>\n"
     await message.reply(text)
 
 
@@ -1297,9 +1377,10 @@ async def init_system():
 
 async def main():
     await init_system()
-    print("\n✨ WIN GO AI Bot v4.0 - Full Reset + Bet Size System\n")
+    print("\n✨ WIN GO AI Bot v4.0 - 6 Step Bet Sequence + Auto Reset\n")
     print(f"👑 Owner: {OWNER_ID}")
     print(f"🧠 Default AI: {DEFAULT_AI_MODE}")
+    print(f"💲 Default Bet: 100→300→900→2700→8100→24300")
     print(f"🛡️ Sudo Users: {len(SUDO_USERS)}\n")
 
     dp.include_router(auth_router)
@@ -1311,5 +1392,7 @@ async def main():
 
 
 if __name__ == '__main__':
-    try: asyncio.run(main())
-    except KeyboardInterrupt: print("\n🔴 Bot Stopped")
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🔴 Bot Stopped")
