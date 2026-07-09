@@ -1,60 +1,55 @@
-# bot.py
+
+---
+
+## 📁 `PSP-AUTO-BETTING-V5.py` (အပြည့်အစုံ)
+
+```python
+# PSP-AUTO-BETTING-V5.py
+"""
+PSP AUTO BETTING V5
+- API History + AI Prediction (16 Modes)
+- Playwright Browser Automation for Real Betting
+- Virtual Mode (Play Money)
+- Session Save & Reuse
+- Premium Emojis for Messages
+- Standard Emojis for Keyboards
+"""
+
 import asyncio
-import time
 import os
-import io
+import html
+import random
+import time
+import math
+import aiohttp
 from datetime import datetime
 from dotenv import load_dotenv
-import aiohttp
 
-from aiogram import Bot, Dispatcher, types, Router
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import (
-    BufferedInputFile, InputMediaPhoto,
-    InlineKeyboardButton, InlineKeyboardMarkup,
-    ReplyKeyboardMarkup, KeyboardButton,
-    ReplyKeyboardRemove
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, InlineKeyboardButton
 )
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
-from aiogram import BaseMiddleware
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from playwright.async_api import async_playwright
 
-import numpy as np
-import matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import warnings
-warnings.filterwarnings("ignore")
-
-from database import db
-from ai_engines import AI_MODES, get_prediction
-
-# ==========================================
-# 1. CONFIGURATION
-# ==========================================
 load_dotenv()
-
-USERNAME = os.getenv("BIGWIN_USERNAME", "959675323878")
-PASSWORD = os.getenv("BIGWIN_PASSWORD", "Mitheint11")
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
-OWNER_ID = os.getenv("OWNER_ID")
-
-if not all([BOT_TOKEN, CHANNEL_ID, OWNER_ID]):
-    print("❌ Error: .env ဖိုင်တွင် အချက်အလက်များ မပြည့်စုံပါ။")
-    exit()
+OWNER_ID = os.getenv("OWNER_ID", "0")
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher()
+storage = MemoryStorage()
+dp = Dispatcher(storage=storage)
 
-auth_router = Router()
-owner_router = Router()
-
-# ==========================================
-# 2. PREMIUM EMOJI CONSTANTS
-# ==========================================
+# ==========================================================
+# PREMIUM EMOJI CONSTANTS
+# ==========================================================
 PREMIUM_EMOJI_IDS = {
     "win_check": "5852871561983299073",
     "lose_cross": "5852812849780362931",
@@ -76,7 +71,8 @@ def premium_emoji(key, fallback):
 
 
 class Emoji:
-    # ========== Premium Emojis (Message Text အတွက်ပဲ) ==========
+    """Premium Emojis for Messages | Standard for Keyboards"""
+    # Premium (Message Text Only)
     WIN_CHECK = premium_emoji("win_check", "✅")
     LOSE_CROSS = premium_emoji("lose_cross", "❌")
     ORDER = premium_emoji("order", "📝")
@@ -89,7 +85,7 @@ class Emoji:
     MOMENTUM = premium_emoji("momentum", "📈")
     CHART_DOWN = premium_emoji("chart_down", "📉")
 
-    # ========== Standard Emojis (Keyboard & Print အတွက်) ==========
+    # Standard (Keyboard & System)
     CHECK = "✅"
     CROSS = "❌"
     WARNING = "⚠️"
@@ -138,21 +134,12 @@ class Emoji:
     SUDO = "🛡️"
     USER = "👤"
     BANNED = "🚫"
+    TARGET = "🎯"
 
 
-# ==========================================
-# 3. SYSTEM VARIABLES
-# ==========================================
-CURRENT_TOKEN = ""
-LAST_PROCESSED_ISSUE = None
-MAIN_MESSAGE_ID = None
-SESSION_START_ISSUE = None
-DEFAULT_AI_MODE = "ensemble"
-SUDO_USERS = set()
-
-# Default Bet Sequence (6 ဆင့်)
-DEFAULT_BET_SEQUENCE = [100, 300, 900, 2700, 8100, 24300]
-
+# ==========================================================
+# API CONFIGURATION
+# ==========================================================
 BASE_HEADERS = {
     'authority': 'api.bigwinqaz.com',
     'accept': 'application/json, text/plain, */*',
@@ -162,1232 +149,1206 @@ BASE_HEADERS = {
     'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
 }
 
+# ==========================================================
+# FSM States
+# ==========================================================
+class LoginForm(StatesGroup):
+    enter_phone = State()
+    enter_password = State()
+    main_menu = State()
+    set_bet_size = State()
+    set_target = State()
 
-# ==========================================
-# 4. PERMISSION MIDDLEWARE
-# ==========================================
-class AuthMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        if isinstance(event, types.Message):
-            user_id = event.from_user.id
-        elif isinstance(event, types.CallbackQuery):
-            user_id = event.from_user.id
-        else:
-            return await handler(event, data)
+# ==========================================================
+# Global Settings
+# ==========================================================
+is_bot_running = False
+AUTHORIZED_USERS = set()
+USER_SESSIONS = {}
 
-        if str(user_id) != str(OWNER_ID) and user_id not in SUDO_USERS:
-            if isinstance(event, types.Message):
-                await event.reply("🔒 <b>Access Denied!</b>")
-            elif isinstance(event, types.CallbackQuery):
-                await event.answer("🔒 Access Denied!", show_alert=True)
-            return
+DEFAULT_BET_SEQUENCE = [100, 300, 900, 2700, 8100, 24300]
+DEFAULT_AI_MODE = "pattern"
+DEFAULT_PROFIT_TARGET = 30000
 
-        return await handler(event, data)
+VIRTUAL_BALANCES = {}
+DEFAULT_PATTERN = ["BIG", "SMALL", "BIG", "BIG"]
 
-
-class OwnerOnlyMiddleware(BaseMiddleware):
-    async def __call__(self, handler, event, data):
-        if isinstance(event, types.Message):
-            user_id = event.from_user.id
-        elif isinstance(event, types.CallbackQuery):
-            user_id = event.from_user.id
-        else:
-            return await handler(event, data)
-
-        if str(user_id) != str(OWNER_ID):
-            if isinstance(event, types.Message):
-                await event.reply("❌ Owner only!")
-            elif isinstance(event, types.CallbackQuery):
-                await event.answer("👑 Owner only!", show_alert=True)
-            return
-
-        return await handler(event, data)
+# ==========================================================
+# Virtual Balance System
+# ==========================================================
+def get_virtual_balance(user_id: int) -> dict:
+    if user_id not in VIRTUAL_BALANCES:
+        VIRTUAL_BALANCES[user_id] = {
+            "balance": 100000.0,
+            "session_profit": 0.0,
+            "total_wins": 0,
+            "total_losses": 0,
+            "best_streak": 0,
+            "current_streak": 0,
+        }
+    return VIRTUAL_BALANCES[user_id]
 
 
-auth_router.message.middleware(AuthMiddleware())
-auth_router.callback_query.middleware(AuthMiddleware())
-owner_router.message.middleware(OwnerOnlyMiddleware())
-owner_router.callback_query.middleware(OwnerOnlyMiddleware())
+def update_virtual_balance(user_id: int, amount: float, operation: str = "add") -> dict:
+    vbal = get_virtual_balance(user_id)
+    if operation == "add":
+        vbal["balance"] += amount
+    elif operation == "subtract":
+        vbal["balance"] -= amount
+    elif operation == "set":
+        vbal["balance"] = amount
+    return vbal
+
+# ==========================================================
+# Keyboards (Standard Emoji Only)
+# ==========================================================
+def get_main_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Login")],
+            [KeyboardButton(text="Status")]
+        ],
+        resize_keyboard=True
+    )
 
 
-# ==========================================
-# 5. KEYBOARD BUILDERS (Standard Emoji Only)
-# ==========================================
-def get_main_reply_keyboard(is_active: bool = False) -> ReplyKeyboardMarkup:
-    """Main Reply Keyboard - Standard Emoji Only"""
-    builder = ReplyKeyboardBuilder()
-
-    if is_active:
-        builder.row(KeyboardButton(text="⏹️ Stop Auto-Bet"))
+def get_logged_in_keyboard(is_real_logged: bool = False):
+    buttons = [
+        [KeyboardButton(text="Info"), KeyboardButton(text="Balance")],
+        [KeyboardButton(text="Bet Size"), KeyboardButton(text="AI Mode")],
+        [KeyboardButton(text="Set Target"), KeyboardButton(text="Status")],
+    ]
+    
+    if is_real_logged:
+        buttons.append([KeyboardButton(text="Real Auto-Bet"), KeyboardButton(text="Stop")])
+        buttons.append([KeyboardButton(text="Virtual Auto-Bet")])
     else:
-        builder.row(KeyboardButton(text="▶️ Start Auto-Bet"))
+        buttons.append([KeyboardButton(text="Virtual Auto-Bet"), KeyboardButton(text="Stop")])
+    
+    buttons.append([KeyboardButton(text="Logout")])
+    
+    return ReplyKeyboardMarkup(keyboard=buttons, resize_keyboard=True)
 
-    builder.row(
-        KeyboardButton(text="💰 Balance"),
-        KeyboardButton(text="🧠 AI Mode"),
+
+def get_ai_mode_keyboard():
+    builder = InlineKeyboardBuilder()
+    
+    ai_modes = [
+        ("pattern", "Pattern AI"),
+        ("martingale", "Martingale AI"),
+        ("anti_martingale", "Anti-Martingale"),
+        ("trend_following", "Trend Following"),
+        ("fibonacci", "Fibonacci AI"),
+        ("golden_ratio", "Golden Ratio"),
+        ("momentum", "Momentum AI"),
+        ("monte_carlo", "Monte Carlo"),
+        ("neural_pattern", "Neural Pattern"),
+        ("quick_reversal", "Quick Reversal"),
+        ("wave_analysis", "Wave Analysis"),
+        ("chaos_theory", "Chaos Theory"),
+        ("ensemble", "Ensemble AI"),
+        ("bayesian", "Bayesian AI"),
+        ("markov_chain", "Markov Chain"),
+        ("ml_style", "ML Style AI"),
+    ]
+    
+    for key, name in ai_modes:
+        builder.row(InlineKeyboardButton(text=name, callback_data=f"ai_{key}"))
+    
+    builder.row(InlineKeyboardButton(text="Close", callback_data="ai_close"))
+    return builder.as_markup()
+
+# ==========================================================
+# Command Handlers
+# ==========================================================
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    
+    if str(message.from_user.id) != str(OWNER_ID) and message.from_user.id not in AUTHORIZED_USERS:
+        await message.answer(
+            f"{Emoji.LOCK} <b>Access Denied!</b>\n\n"
+            "This bot is for authorized users only.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    vbal = get_virtual_balance(message.from_user.id)
+    
+    await message.answer(
+        f"{Emoji.SPARKLES} <b>PSP AUTO BETTING V5</b>\n"
+        f"{Emoji.BRAIN} API Prediction + Browser Betting (16 AI Modes)\n\n"
+        f"{Emoji.MONEY_ICON} Virtual Balance: <b>{vbal['balance']:,.0f} Ks</b>\n\n"
+        f"{Emoji.KEY} <b>Login</b> for Real Mode\n"
+        f"{Emoji.GAME} <b>Virtual Mode</b> - No login needed",
+        reply_markup=get_main_keyboard()
     )
-    builder.row(
-        KeyboardButton(text="📊 Status"),
-        KeyboardButton(text="⚙️ Settings"),
-    )
-    builder.row(
-        KeyboardButton(text="📋 My Bets"),
-        KeyboardButton(text="👑 Top 10"),
-    )
-
-    return builder.as_markup(resize_keyboard=True)
 
 
-def get_settings_inline_keyboard() -> InlineKeyboardMarkup:
-    """Settings Inline Keyboard - Standard Emoji Only"""
-    builder = InlineKeyboardBuilder()
-
-    builder.row(InlineKeyboardButton(
-        text="💎 Add Balance",
-        callback_data="cmd_addbal"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="💵 Withdraw",
-        callback_data="cmd_withdraw"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="🎯 Set Profit Target",
-        callback_data="cmd_target"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="💲 Set Bet Size",
-        callback_data="cmd_betsize"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="📈 Compare AI Modes",
-        callback_data="cmd_compare"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="🔙 Back",
-        callback_data="cmd_back"
-    ))
-
-    return builder.as_markup()
+@dp.message(Command("stop"))
+async def cmd_stop(message: types.Message):
+    global is_bot_running
+    is_bot_running = False
+    await message.answer(f"{Emoji.CHECK} Auto-Bet stop signal sent.")
 
 
-def get_ai_mode_inline_keyboard(current_mode: str) -> InlineKeyboardMarkup:
-    """AI Mode Selection Inline Keyboard - Standard Emoji Only"""
-    builder = InlineKeyboardBuilder()
-    modes_list = list(AI_MODES.items())
-
-    for i in range(0, len(modes_list), 2):
-        row_buttons = []
-        for j in range(2):
-            if i + j < len(modes_list):
-                key, info = modes_list[i + j]
-                prefix = "⭐ " if key == current_mode else ""
-                row_buttons.append(InlineKeyboardButton(
-                    text=f"{prefix}{info['name']}",
-                    callback_data=f"usermode_{key}"
-                ))
-        builder.row(*row_buttons)
-
-    builder.row(InlineKeyboardButton(
-        text="🔙 Back to Main",
-        callback_data="cmd_back"
-    ))
-
-    return builder.as_markup()
+@dp.message(Command("adduser"))
+async def cmd_add_user(message: types.Message):
+    if str(message.from_user.id) != str(OWNER_ID):
+        return await message.answer(f"{Emoji.CROSS} Owner only!")
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            return await message.answer("<code>/adduser [user_id]</code>")
+        user_id = int(parts[1])
+        AUTHORIZED_USERS.add(user_id)
+        await message.answer(f"{Emoji.CHECK} User <code>{user_id}</code> added.")
+    except:
+        await message.answer(f"{Emoji.CROSS} Invalid user ID.")
 
 
-def get_add_balance_keyboard() -> InlineKeyboardMarkup:
-    """Add Balance Inline Keyboard"""
-    builder = InlineKeyboardBuilder()
-    for amt in [10000, 50000, 100000, 500000]:
-        builder.row(InlineKeyboardButton(
-            text=f"💵 +{amt:,} Ks",
-            callback_data=f"addbal_{amt}"
-        ))
-    builder.row(InlineKeyboardButton(text="🔙 Back", callback_data="cmd_back"))
-    return builder.as_markup()
+@dp.message(Command("deluser"))
+async def cmd_del_user(message: types.Message):
+    if str(message.from_user.id) != str(OWNER_ID):
+        return await message.answer(f"{Emoji.CROSS} Owner only!")
+    try:
+        parts = message.text.split()
+        if len(parts) < 2:
+            return await message.answer("<code>/deluser [user_id]</code>")
+        user_id = int(parts[1])
+        AUTHORIZED_USERS.discard(user_id)
+        await message.answer(f"{Emoji.CHECK} User <code>{user_id}</code> removed.")
+    except:
+        await message.answer(f"{Emoji.CROSS} Invalid user ID.")
 
-
-def get_withdraw_keyboard() -> InlineKeyboardMarkup:
-    """Withdraw Inline Keyboard"""
-    builder = InlineKeyboardBuilder()
-    for amt in [10000, 50000, 100000]:
-        builder.row(InlineKeyboardButton(
-            text=f"💵 -{amt:,} Ks",
-            callback_data=f"withdraw_{amt}"
-        ))
-    builder.row(InlineKeyboardButton(text="💰 Withdraw All", callback_data="withdraw_all"))
-    builder.row(InlineKeyboardButton(text="🔙 Back", callback_data="cmd_back"))
-    return builder.as_markup()
-
-
-def get_betsize_inline_keyboard(current_seq: list) -> InlineKeyboardMarkup:
-    """Bet Size Selection Inline Keyboard"""
-    builder = InlineKeyboardBuilder()
-
-    builder.row(InlineKeyboardButton(
-        text="💰 100-300-900-2700-8100-24300 (6 Steps - Default)",
-        callback_data="setbetsize_100_300_900_2700_8100_24300"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="💰 100-300-900-2700-8100 (5 Steps)",
-        callback_data="setbetsize_100_300_900_2700_8100"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="💰 50-150-450-1350-4050-12150 (Small 6 Steps)",
-        callback_data="setbetsize_50_150_450_1350_4050_12150"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="💰 200-600-1800-5400-16200-48600 (Medium 6 Steps)",
-        callback_data="setbetsize_200_600_1800_5400_16200_48600"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="✏️ Custom Bet Size (စာရိုက်ထည့်ရန်)",
-        callback_data="betsize_custom"
-    ))
-    builder.row(InlineKeyboardButton(
-        text="🔙 Back to Settings",
-        callback_data="cmd_back"
-    ))
-
-    return builder.as_markup()
-
-
-# ==========================================
-# 6. API FUNCTIONS
-# ==========================================
-async def fetch_with_retry(session, url, headers, json_data, retries=1):
+# ==========================================================
+# API Functions
+# ==========================================================
+async def fetch_api(session, url, json_data, retries=2):
     for _ in range(retries):
         try:
-            async with session.post(url, headers=headers, json=json_data, timeout=3.0) as resp:
+            async with session.post(url, headers=BASE_HEADERS, json=json_data, timeout=5.0) as resp:
                 if resp.status == 200:
                     return await resp.json()
-        except Exception:
-            await asyncio.sleep(0.2)
+        except:
+            await asyncio.sleep(0.3)
     return None
 
 
-async def login_and_get_token(session: aiohttp.ClientSession):
-    global CURRENT_TOKEN
+async def get_game_history(session) -> list:
     json_data = {
-        'username': USERNAME, 'pwd': PASSWORD, 'phonetype': 1, 'logintype': 'mobile',
-        'packId': '', 'deviceId': '51ed4ee0f338a1bb24063ffdfcd31ce6', 'language': 7,
-        'random': '4fc4413428be43faa1a3f30d9745ae3a',
-        'signature': '5458639AF428AC897FDFF1102D82EB9C',
-        'timestamp': int(time.time()),
-    }
-    data = await fetch_with_retry(
-        session, 'https://api.bigwinqaz.com/api/webapi/Login', BASE_HEADERS, json_data
-    )
-    if data and data.get('code') == 0:
-        token_str = data.get('data', {})
-        CURRENT_TOKEN = f"Bearer {token_str}" if isinstance(token_str, str) else f"Bearer {token_str.get('token', '')}"
-        print("✅ Login Success\n")
-        return True
-    return False
-
-
-# ==========================================
-# 7. NOTIFICATION SYSTEM
-# ==========================================
-async def send_bet_result_notification(user_id, bet, actual_size, actual_number, is_win, profit):
-    try:
-        user = await db.get_user(user_id)
-        active_users = await db.get_active_users()
-        is_active = user_id in active_users
-
-        color_map = {
-            0: "🟣 VIOLET", 1: "🟢 GREEN", 2: "🔴 RED",
-            3: "🟢 GREEN", 4: "🔴 RED", 5: "🟢 GREEN",
-            6: "🔴 RED", 7: "🟢 GREEN", 8: "🔴 RED", 9: "🟢 GREEN"
-        }
-        color = color_map.get(actual_number, "⚪ WHITE")
-        session_profit = user.get('session_profit', 0)
-
-        if is_win:
-            message = (
-                f"{Emoji.WIN_CHECK} <b>WIN!</b> +{profit:,.2f} Ks\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"{Emoji.GAME_ICON} <b>WINGO_30S</b> : <code>{bet['issue_number']}</code>\n"
-                f"{Emoji.CHART_ICON} <b>Result:</b> {actual_number} "
-                f"{Emoji.BULLSEYE if actual_size == 'BIG' else Emoji.GREEN_CIRCLE} "
-                f"{actual_size} {color}\n"
-                f"{Emoji.MONEY_ICON} <b>Balance:</b> {user['balance']:,.2f} Ks\n"
-                f"{Emoji.CHART_UP} <b>Profit:</b> +{session_profit:,.2f} Ks"
-            )
-        else:
-            message = (
-                f"{Emoji.LOSE_CROSS} <b>LOSE!</b> -{bet['bet_amount']:,.2f} Ks\n"
-                f"━━━━━━━━━━━━━━━━━━\n"
-                f"{Emoji.GAME_ICON} <b>WINGO_30S</b> : <code>{bet['issue_number']}</code>\n"
-                f"{Emoji.CHART_ICON} <b>Result:</b> {actual_number} "
-                f"{Emoji.BULLSEYE if actual_size == 'BIG' else Emoji.GREEN_CIRCLE} "
-                f"{actual_size} {color}\n"
-                f"{Emoji.MONEY_ICON} <b>Balance:</b> {user['balance']:,.2f} Ks\n"
-                f"{Emoji.LOSS_ICON} <b>Profit:</b> {session_profit:,.2f} Ks"
-            )
-
-        await bot.send_message(
-            chat_id=user_id,
-            text=message,
-            reply_markup=get_main_reply_keyboard(is_active)
-        )
-    except Exception as e:
-        print(f"Notification error for {user_id}: {e}")
-
-
-async def send_target_reached_notification(user_id: int):
-    try:
-        user = await db.get_user(user_id)
-        target = user.get('profit_target', 30000)
-        await bot.send_message(
-            chat_id=user_id,
-            text=(
-                f"{Emoji.SPARKLES} <b>🎯 Profit Target Reached!</b>\n\n"
-                f"{Emoji.MONEY_ICON} Session Profit: {user['session_profit']:,.2f} Ks\n"
-                f"🎯 Target: {target:,.0f} Ks\n\n"
-                f"{Emoji.CHECK} Auto-bet ရပ်ထားပါပြီ။\n"
-                f"🟢 ပြန်စရန်: <b>Start Auto-Bet</b> ကိုနှိပ်ပါ။"
-            ),
-            reply_markup=get_main_reply_keyboard(False)
-        )
-    except Exception as e:
-        print(f"Target notification error for {user_id}: {e}")
-
-
-# ==========================================
-# 8. CORE GAME LOGIC
-# ==========================================
-async def check_game_and_predict(session: aiohttp.ClientSession):
-    global CURRENT_TOKEN, LAST_PROCESSED_ISSUE, MAIN_MESSAGE_ID, SESSION_START_ISSUE
-
-    active_users = await db.get_active_users()
-    if not active_users:
-        return False
-
-    if not CURRENT_TOKEN:
-        if not await login_and_get_token(session):
-            return False
-
-    headers = BASE_HEADERS.copy()
-    headers['authorization'] = CURRENT_TOKEN
-
-    json_data = {
-        'pageSize': 10, 'pageNo': 1, 'typeId': 30, 'language': 7,
+        'pageSize': 20,
+        'pageNo': 1,
+        'typeId': 30,
+        'language': 7,
         'random': '9ef85244056948ba8dcae7aee7758bf4',
         'signature': '2EDB8C2B5264F62EC53116916A9EC05C',
         'timestamp': int(time.time()),
     }
-
-    data = await fetch_with_retry(
-        session, 'https://api.bigwinqaz.com/api/webapi/GetNoaverageEmerdList', headers, json_data
+    
+    data = await fetch_api(
+        session,
+        'https://api.bigwinqaz.com/api/webapi/GetNoaverageEmerdList',
+        json_data
     )
-
+    
     if data and data.get('code') == 0:
-        records = data.get("data", {}).get("list", [])
-        if records:
-            latest_record = records[0]
-            latest_issue = str(latest_record["issueNumber"])
-            latest_number = int(latest_record["number"])
-            latest_size = "BIG" if latest_number >= 5 else "SMALL"
-
-            is_new = False
-            if not LAST_PROCESSED_ISSUE or int(latest_issue) > int(LAST_PROCESSED_ISSUE):
-                is_new = True
-
-            if is_new:
-                LAST_PROCESSED_ISSUE = latest_issue
-                if not SESSION_START_ISSUE:
-                    SESSION_START_ISSUE = latest_issue
-
-                await db.add_history(latest_issue, latest_number, latest_size)
-
-                # Settle bets and send notifications
-                settled_bets = await db.settle_bets(latest_issue, latest_size, latest_number)
-                for bet in settled_bets:
-                    is_win = bet["result"] == "WIN"
-                    profit = bet["profit"]
-                    await send_bet_result_notification(
-                        bet["user_id"], bet, latest_size, latest_number, is_win, profit
-                    )
-                    user = await db.get_user(bet["user_id"])
-                    if user["session_profit"] >= user.get("profit_target", 30000):
-                        await db.deactivate_session(bet["user_id"])
-                        await send_target_reached_notification(bet["user_id"])
-
-                if settled_bets:
-                    print(f"💰 Settled {len(settled_bets)} bets - {latest_number} ({latest_size})")
-
-                next_issue = str(int(latest_issue) + 1)
-                history_docs = await db.get_history(5000)
-                active_users = await db.get_active_users()
-
-                for user_id in active_users:
-                    try:
-                        user = await db.get_user(user_id)
-                        user_session = await db.get_user_session(user_id)
-                        user_ai_mode = user_session.get("ai_mode", DEFAULT_AI_MODE)
-
-                        # Get prediction using user's AI mode
-                        predicted_size, predicted_display, final_prob, reason = get_prediction(
-                            history_docs, user_ai_mode
-                        )
-                        await db.save_prediction(next_issue, predicted_size, user_ai_mode)
-
-                        # ========== LOSE STREAK WITH AUTO RESET ==========
-                        # Get recent bets to calculate lose streak
-                        recent_bets = await db.get_user_bets(user_id, 30)
-
-                        lose_streak = 0
-                        for bet in recent_bets:
-                            if bet.get("result") == "LOSE":
-                                lose_streak += 1
-                            elif bet.get("result") == "WIN":
-                                break  # WIN တွေ့ရင် streak ပြတ် (reset)
-
-                        # Get user's bet sequence (default 6 steps)
-                        bet_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
-
-                        # If lose streak >= sequence length, reset to 0 (back to first bet)
-                        if lose_streak >= len(bet_seq):
-                            print(f"🔄 User {user_id}: Streak reset! {lose_streak} losses (max {len(bet_seq)}), back to {bet_seq[0]}")
-                            lose_streak = 0
-
-                        # Get bet amount based on current lose streak
-                        bet_amount = bet_seq[lose_streak]
-                        # =====================================================
-
-                        if user["balance"] >= bet_amount:
-                            result = await db.place_bet(
-                                user_id, next_issue, bet_amount, predicted_size, user_ai_mode
-                            )
-                            if result["success"]:
-                                ai_name = AI_MODES.get(user_ai_mode, {}).get("name", "AI")
-
-                                # Show streak info
-                                if lose_streak > 0:
-                                    streak_info = f" | 📉 Streak: {lose_streak}/{len(bet_seq)}"
-                                else:
-                                    streak_info = ""
-
-                                order_msg = (
-                                   # f"{Emoji.ORDER} <b>Order Placed!</b>\n"
-                                    f"{Emoji.GAME_ICON} WINGO_30S: <code>{next_issue}</code>\n"
-                                    f"{Emoji.CHART_ICON} {predicted_size} | {bet_amount:,.0f} Ks{streak_info}\n"
-                                    f"{Emoji.BRAIN} {ai_name}"
-                                )
-                                await bot.send_message(
-                                    chat_id=user_id, text=order_msg,
-                                    reply_markup=get_main_reply_keyboard(True)
-                                )
-                    except Exception as e:
-                        print(f"Auto-bet error for {user_id}: {e}")
-
-                default_pred, default_display, default_prob, default_reason = get_prediction(
-                    history_docs, DEFAULT_AI_MODE
-                )
-                await update_channel_post(next_issue, default_display, default_prob, default_reason)
-                return True
-        return False
-
-    elif data and (data.get('code') == 401 or "token" in str(data.get('msg')).lower()):
-        CURRENT_TOKEN = ""
-        return False
-    return False
-
-
-async def update_channel_post(next_issue, predicted_display, final_prob, reason):
-    global MAIN_MESSAGE_ID, SESSION_START_ISSUE
-    try:
-        session_preds = await db.get_session_predictions(SESSION_START_ISSUE)
-
-        table_str = "<code>Period    | Result  | W/L\n----------|---------|----\n"
-        for p in session_preds[:10]:
-            iss = p.get('issue_number', '0000000')
-            iss_short = f"{iss[:3]}**{iss[-4:]}"
-            act_size = p.get('actual_size', 'BIG')
-            act_num = p.get('actual_number', 0)
-            wl_str = "✅" if "WIN" in p.get("win_lose", "") else "❌"
-            table_str += f"{iss_short:<10}| {act_num}-{act_size:<7} | {wl_str}\n"
-        table_str += "</code>"
-
-        img_buf = await asyncio.to_thread(generate_chart, session_preds)
-        photo = BufferedInputFile(img_buf.read(), filename=f"chart_{int(time.time())}.png")
-
-        sec_left = 30 - (int(time.time()) % 30)
-        iss_display = f"{next_issue[:3]}**{next_issue[-4:]}"
-
-        tg_caption = (
-            f"<b>🏆 WIN GO (30 SECONDS)</b>\n"
-            f"⏰ Next Result In: <b>{sec_left}s</b>\n\n"
-            f"{table_str}\n"
-            f"🎮 <b>Period:</b> {iss_display}\n"
-            f"🤖 <b>AI ခန့်မှန်းချက် : {predicted_display}</b>\n"
-            f"📊 <b>ဖြစ်နိုင်ခြေ : {final_prob}%</b>\n"
-            f"ℹ️ <b>အကြောင်းပြချက် :</b>\n{reason}"
-        )
-
-        if MAIN_MESSAGE_ID:
-            try:
-                media = InputMediaPhoto(media=photo, caption=tg_caption, parse_mode="HTML")
-                await bot.edit_message_media(chat_id=CHANNEL_ID, message_id=MAIN_MESSAGE_ID, media=media)
-            except Exception:
-                msg = await bot.send_photo(chat_id=CHANNEL_ID, photo=photo, caption=tg_caption)
-                MAIN_MESSAGE_ID = msg.message_id
-        else:
-            msg = await bot.send_photo(chat_id=CHANNEL_ID, photo=photo, caption=tg_caption)
-            MAIN_MESSAGE_ID = msg.message_id
-    except Exception as e:
-        print(f"Channel update error: {e}")
-
-
-# ==========================================
-# 9. CHART GENERATOR
-# ==========================================
-def generate_chart(predictions):
-    wins, losses = 0, 0
-    bar_colors, bar_heights, history_wr = [], [], []
-    latest_preds = list(reversed(predictions))[-20:]
-
-    for i, p in enumerate(latest_preds):
-        if 'WIN' in p.get('win_lose', ''):
-            wins += 1
-            bar_colors.append('#00e5ff')
-        else:
-            losses += 1
-            bar_colors.append('#ff4444')
-        current_wr = (wins / (i + 1)) * 100
-        bar_heights.append(current_wr)
-        history_wr.append(current_wr)
-
-    total_played = wins + losses
-    win_rate = int((wins / total_played * 100)) if total_played > 0 else 0
-
-    fig = plt.figure(figsize=(10.24, 7.68), facecolor='#1c1f26')
-    fig.text(0.05, 0.93, "🏆 WIN GO PERFORMANCE", color='#ffffff', fontsize=26, fontweight='bold', ha='left')
-
-    ax_circle = fig.add_axes([0.08, 0.42, 0.35, 0.40])
-    ax_circle.set_axis_off()
-    ax_circle.set_xlim(0, 1)
-    ax_circle.set_ylim(0, 1)
-    theta_bg = np.linspace(-1.25 * np.pi, 0.25 * np.pi, 200)
-    ax_circle.plot(0.5 + 0.45 * np.cos(theta_bg), 0.5 + 0.45 * np.sin(theta_bg), color='#2c313c', linewidth=12)
-    if win_rate > 0:
-        end_angle = 0.25 * np.pi - (win_rate / 100) * 1.5 * np.pi
-        theta_fg = np.linspace(0.25 * np.pi, end_angle, 100)
-        ax_circle.plot(0.5 + 0.45 * np.cos(theta_fg), 0.5 + 0.45 * np.sin(theta_fg), color='#00e5ff', linewidth=12)
-    ax_circle.text(0.5, 0.75, f"{total_played}/20", color='#a3a8b5', fontsize=16, fontweight='bold', ha='center')
-    ax_circle.text(0.5, 0.48, f"{win_rate}%", color='#00e5ff', fontsize=65, fontweight='bold', ha='center')
-
-    ax_bar = fig.add_axes([0.55, 0.47, 0.38, 0.33])
-    ax_bar.set_facecolor('#1c1f26')
-    ax_bar.set_xlim(-0.5, 19.5)
-    ax_bar.set_ylim(0, 105)
-    for spine in ax_bar.spines.values():
-        spine.set_visible(False)
-    ax_bar.set_yticks([0, 25, 50, 75, 100])
-    ax_bar.set_yticklabels(['0%', '25%', '50%', '75%', '100%'], color='#7a8294', fontsize=10)
-    ax_bar.grid(axis='y', color='#2c313c', linewidth=1.5)
-    if total_played > 0:
-        x_pos = np.arange(total_played)
-        ax_bar.bar(x_pos, bar_heights, color=bar_colors, width=0.8, alpha=0.15, align='center')
-        ax_bar.bar(x_pos, bar_heights, color=bar_colors, width=0.45, alpha=0.9, align='center')
-        ax_bar.plot(x_pos, history_wr, color='#00e5ff', linewidth=2.5, marker='o',
-                    markersize=6, markerfacecolor='#1c1f26', markeredgecolor='#00e5ff', markeredgewidth=2)
-    ax_bar.set_xticks(np.arange(20))
-    ax_bar.set_xticklabels([str(i + 1) for i in range(20)], color='#7a8294', fontsize=10)
-
-    ax_win = fig.add_axes([0.05, 0.22, 0.28, 0.16])
-    ax_win.set_axis_off()
-    rect_win = patches.FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0,rounding_size=0.1", fc="#1de9b6")
-    ax_win.add_patch(rect_win)
-    ax_win.text(0.1, 0.75, "WINS", color='#004d40', fontsize=16, fontweight='bold')
-    ax_win.text(0.1, 0.35, f"{wins}", color='#000000', fontsize=48, fontweight='bold')
-
-    ax_lose = fig.add_axes([0.35, 0.22, 0.28, 0.16])
-    ax_lose.set_axis_off()
-    rect_lose = patches.FancyBboxPatch((0, 0), 1, 1, boxstyle="round,pad=0,rounding_size=0.1", fc="#ef5350")
-    ax_lose.add_patch(rect_lose)
-    ax_lose.text(0.1, 0.75, "LOSSES", color='#4d0000', fontsize=16, fontweight='bold')
-    ax_lose.text(0.1, 0.35, f"{losses}", color='#ffffff', fontsize=48, fontweight='bold')
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png', dpi=100, facecolor='#1c1f26')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
-
-
-# ==========================================
-# 10. SCHEDULER
-# ==========================================
-async def auto_broadcaster():
-    await db.init_indexes()
-    global SUDO_USERS
-    SUDO_USERS = await db.get_sudo_users()
-    print(f"✅ DB Connected | 🛡️ Sudo: {len(SUDO_USERS)}")
-
-    async with aiohttp.ClientSession() as session:
-        await login_and_get_token(session)
-        while True:
-            current_time = time.time()
-            sec_passed = int(current_time) % 30
-            active_users = await db.get_active_users()
-            if active_users and 5 <= sec_passed <= 28:
-                try:
-                    is_processed = await check_game_and_predict(session)
-                    if is_processed:
-                        await asyncio.sleep(30 - (int(time.time()) % 30))
-                        continue
-                except Exception as e:
-                    print(f"Scheduler error: {e}")
-            await asyncio.sleep(0.5)
-
-
-# ==========================================
-# 11. COMMAND HANDLERS
-# ==========================================
-@auth_router.message(Command("start"))
-@auth_router.message(lambda m: m.text and m.text.lower().strip() in ['.start', '/start'])
-async def cmd_start(message: types.Message):
-    user = await db.get_user(message.from_user.id)
-    active_users = await db.get_active_users()
-    is_active = message.from_user.id in active_users
-    user_session = await db.get_user_session(message.from_user.id)
-    user_ai_mode = user_session.get("ai_mode", DEFAULT_AI_MODE)
-
-    bet_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
-    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
-
-    await message.reply(
-        f"{Emoji.SPARKLES} <b>WIN GO AI Bot v4.0</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🛡️ <b>Access:</b> {'Owner' if str(message.from_user.id) == str(OWNER_ID) else 'Sudo'}\n"
-        f"{Emoji.MONEY_ICON} <b>Balance:</b> {user['balance']:,.0f} Ks\n"
-        f"🟢 <b>Status:</b> {'Active' if is_active else 'Inactive'}\n"
-        f"{Emoji.BRAIN} <b>Your AI:</b> {AI_MODES.get(user_ai_mode, {}).get('name', 'AI')}\n"
-        f"🎯 <b>Target:</b> {user.get('profit_target', 30000):,.0f} Ks\n"
-        f"💲 <b>Bet Size:</b> {bet_str}\n\n"
-        f"👇 <b>အောက်က Keyboard ကိုသုံးပါ:</b>",
-        reply_markup=get_main_reply_keyboard(is_active)
-    )
-
-
-# ==========================================
-# 12. REPLY KEYBOARD HANDLERS
-# ==========================================
-@auth_router.message(lambda m: m.text and m.text.strip() == "▶️ Start Auto-Bet")
-async def handle_start_button(message: types.Message):
-    """Start Auto-Bet with Full Reset"""
-    user_id = message.from_user.id
-    active_users = await db.get_active_users()
-
-    if user_id in active_users:
-        await message.reply("✅ Already active!", reply_markup=get_main_reply_keyboard(True))
-        return
-
-    user_session = await db.get_user_session(user_id)
-
-    # ========== FULL RESET ==========
-    await db.reset_session_profit(user_id)
-    await db.users.update_one(
-        {"user_id": user_id},
-        {"$set": {"session_profit": 0.0, "win_streak": 0, "lose_streak": 0}}
-    )
-    await db.bets.delete_many({"user_id": user_id, "result": None})
-
-    # Activate session
-    await db.activate_session(user_id, user_session.get("ai_mode", DEFAULT_AI_MODE))
-
-    user = await db.get_user(user_id)
-    bet_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
-    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
-
-    await message.reply(
-        f"✅ <b>Auto-Bet Activated!</b>\n\n"
-        f"💰 Balance: {user['balance']:,.0f} Ks\n"
-        f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n"
-        f"💲 Bet Size: {bet_str}\n"
-        f"🔄 Session Reset Complete! (Starting from {bet_seq[0]:,})\n\n"
-        f"👇 Keyboard ကိုသုံးပါ:",
-        reply_markup=get_main_reply_keyboard(True)
-    )
-
-
-@auth_router.message(lambda m: m.text and m.text.strip() == "⏹️ Stop Auto-Bet")
-async def handle_stop_button(message: types.Message):
-    """Stop Auto-Bet"""
-    user_id = message.from_user.id
-    active_users = await db.get_active_users()
-
-    if user_id not in active_users:
-        await message.reply("❌ Not active!", reply_markup=get_main_reply_keyboard(False))
-        return
-
-    await db.deactivate_session(user_id)
-
-    # Delete pending bets
-    await db.bets.delete_many({"user_id": user_id, "result": None})
-
-    user = await db.get_user(user_id)
-
-    await message.reply(
-        f"🔴 <b>Auto-Bet Stopped!</b>\n\n"
-        f"💰 Balance: {user['balance']:,.0f} Ks\n"
-        f"📈 Session Profit: {user['session_profit']:,.2f} Ks\n"
-        f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n\n"
-        f"🔄 Start ပြန်နှိပ်ရင် အားလုံး Reset လုပ်ပါမည်။",
-        reply_markup=get_main_reply_keyboard(False)
-    )
-
-
-@auth_router.message(lambda m: m.text and m.text.strip() == "💰 Balance")
-async def handle_bal_button(message: types.Message):
-    user = await db.get_user(message.from_user.id)
-    active_users = await db.get_active_users()
-    is_active = message.from_user.id in active_users
-    await message.reply(
-        f"{Emoji.MONEY_ICON} <b>သင့်အကောင့်</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🟢 Status: {'Active' if is_active else 'Inactive'}\n"
-        f"💵 Balance: {user['balance']:,.2f} Ks\n"
-        f"📈 Session: {user['session_profit']:,.2f} Ks\n"
-        f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n"
-        f"✅ Wins: {user['total_wins']} | ❌ Losses: {user['total_losses']}",
-        reply_markup=get_main_reply_keyboard(is_active)
-    )
-
-
-@auth_router.message(lambda m: m.text and m.text.strip() == "🧠 AI Mode")
-async def handle_mode_button(message: types.Message):
-    user_session = await db.get_user_session(message.from_user.id)
-    current_mode = user_session.get("ai_mode", DEFAULT_AI_MODE)
-    await message.reply(
-        f"🧠 <b>AI Mode ရွေးပါ (၁၆ မျိုး)</b>\n"
-        f"📌 လက်ရှိ: <b>{AI_MODES.get(current_mode, {}).get('name', 'AI')}</b>\n\n"
-        f"👇 အောက်က Button များမှရွေးပါ:",
-        reply_markup=get_ai_mode_inline_keyboard(current_mode)
-    )
-
-
-@auth_router.message(lambda m: m.text and m.text.strip() == "📊 Status")
-async def handle_status_button(message: types.Message):
-    user = await db.get_user(message.from_user.id)
-    active_users = await db.get_active_users()
-    is_active = message.from_user.id in active_users
-    user_session = await db.get_user_session(message.from_user.id)
-    pending = await db.get_pending_bets_count(message.from_user.id)
-
-    bet_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
-    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
-
-    # Calculate current lose streak
-    recent_bets = await db.get_user_bets(message.from_user.id, 20)
-    lose_streak = 0
-    for bet in recent_bets:
-        if bet.get("result") == "LOSE":
-            lose_streak += 1
-        elif bet.get("result") == "WIN":
-            break
-
-    await message.reply(
-        f"📊 <b>သင့် Status</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🟢 Auto-Bet: {'Active' if is_active else 'Inactive'}\n"
-        f"🧠 AI: {AI_MODES.get(user_session.get('ai_mode', DEFAULT_AI_MODE), {}).get('name', 'AI')}\n"
-        f"💰 Balance: {user['balance']:,.0f} Ks\n"
-        f"📈 Session Profit: {user['session_profit']:,.2f} Ks\n"
-        f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n"
-        f"💲 Bet Size: {bet_str}\n"
-        f"📉 Current Streak: {lose_streak}/{len(bet_seq)}\n"
-        f"⏳ Pending: {pending}\n"
-        f"🔥 Best Streak: {user.get('best_streak', 0)}",
-        reply_markup=get_main_reply_keyboard(is_active)
-    )
-
-
-@auth_router.message(lambda m: m.text and m.text.strip() == "⚙️ Settings")
-async def handle_settings_button(message: types.Message):
-    await message.reply(
-        "⚙️ <b>Settings</b>\n\n👇 အောက်က Button များမှရွေးပါ:",
-        reply_markup=get_settings_inline_keyboard()
-    )
-
-
-@auth_router.message(lambda m: m.text and m.text.strip() == "📋 My Bets")
-async def handle_mybets_button(message: types.Message):
-    bets = await db.get_user_bets(message.from_user.id, 10)
-    active_users = await db.get_active_users()
-    is_active = message.from_user.id in active_users
-    text = "📋 <b>မှတ်တမ်း</b>\n"
-    if bets:
-        for bet in bets:
-            if bet["result"] is None:
-                status = "⏳"
-            elif bet["result"] == "WIN":
-                status = f"✅ +{bet['profit']:,.0f}"
+        records = data.get('data', {}).get('list', [])
+        return [
+            {
+                'issue_number': str(r['issueNumber']),
+                'number': int(r['number']),
+                'size': 'BIG' if int(r['number']) >= 5 else 'SMALL'
+            }
+            for r in records
+        ]
+    return []
+
+# ==========================================================
+# AI Prediction Functions (16 Modes)
+# ==========================================================
+def predict_next(history: list, ai_mode: str = "pattern") -> str:
+    if len(history) < 5:
+        return 'BIG'
+    
+    recent = [h['size'] for h in history[:20]]
+    
+    ai_functions = {
+        "pattern": predict_pattern,
+        "martingale": predict_martingale,
+        "anti_martingale": predict_anti_martingale,
+        "trend_following": predict_trend,
+        "fibonacci": predict_fibonacci,
+        "golden_ratio": predict_golden_ratio,
+        "momentum": predict_momentum,
+        "monte_carlo": predict_monte_carlo,
+        "neural_pattern": predict_neural_pattern,
+        "quick_reversal": predict_quick_reversal,
+        "wave_analysis": predict_wave_analysis,
+        "chaos_theory": predict_chaos_theory,
+        "ensemble": predict_ensemble,
+        "bayesian": predict_bayesian,
+        "markov_chain": predict_markov_chain,
+        "ml_style": predict_ml_style,
+    }
+    
+    func = ai_functions.get(ai_mode, predict_pattern)
+    return func(recent)
+
+
+def predict_pattern(recent: list) -> str:
+    if len(recent) >= 4 and recent[:4] == ['BIG', 'BIG', 'SMALL', 'SMALL']:
+        return 'BIG'
+    if len(recent) >= 4 and recent[:4] == ['SMALL', 'SMALL', 'BIG', 'BIG']:
+        return 'SMALL'
+    if len(recent) >= 4 and recent[:4] == ['BIG', 'SMALL', 'BIG', 'SMALL']:
+        return 'BIG'
+    if len(recent) >= 4 and recent[:4] == ['SMALL', 'BIG', 'SMALL', 'BIG']:
+        return 'SMALL'
+    if len(recent) >= 3 and recent[:3] == ['BIG', 'BIG', 'BIG']:
+        return 'BIG'
+    if len(recent) >= 3 and recent[:3] == ['SMALL', 'SMALL', 'SMALL']:
+        return 'SMALL'
+    if len(recent) >= 3 and recent[:3] == ['BIG', 'BIG', 'SMALL']:
+        return 'BIG'
+    if len(recent) >= 3 and recent[:3] == ['SMALL', 'SMALL', 'BIG']:
+        return 'SMALL'
+    
+    last_5 = recent[:5]
+    big_count = last_5.count('BIG')
+    small_count = last_5.count('SMALL')
+    if big_count > small_count:
+        return 'BIG'
+    elif small_count > big_count:
+        return 'SMALL'
+    return 'BIG' if recent[0] == 'SMALL' else 'SMALL'
+
+
+def predict_martingale(recent: list) -> str:
+    last_10 = recent[:10]
+    big_count = last_10.count('BIG')
+    small_count = last_10.count('SMALL')
+    return 'SMALL' if big_count > small_count else 'BIG'
+
+
+def predict_anti_martingale(recent: list) -> str:
+    last_3 = recent[:3]
+    if last_3.count('BIG') >= 2:
+        return 'BIG'
+    elif last_3.count('SMALL') >= 2:
+        return 'SMALL'
+    return recent[0]
+
+
+def predict_trend(recent: list) -> str:
+    last_8 = recent[:8]
+    last_4 = recent[:4]
+    big_8 = last_8.count('BIG') / 8
+    big_4 = last_4.count('BIG') / 4
+    trend = big_4 - big_8
+    return 'BIG' if trend > 0 else 'SMALL'
+
+
+def predict_fibonacci(recent: list) -> str:
+    fib_levels = [3, 5, 8, 13, 21]
+    results = []
+    for level in fib_levels:
+        if len(recent) >= level:
+            segment = recent[:level]
+            big_pct = segment.count('BIG') / level
+            if 0.38 <= big_pct <= 0.62:
+                results.append('BIG' if big_pct < 0.5 else 'SMALL')
+            elif big_pct > 0.618:
+                results.append('SMALL')
             else:
-                status = f"❌ -{bet['bet_amount']:,.0f}"
-            text += f"{bet['issue_number']}: {bet['bet_amount']:,.0f}K {bet['predicted_size']} → {status}\n"
-    else:
-        text += "မရှိသေးပါ"
-    await message.reply(text, reply_markup=get_main_reply_keyboard(is_active))
+                results.append('BIG')
+    if results:
+        return max(set(results), key=results.count)
+    return recent[0]
 
 
-@auth_router.message(lambda m: m.text and m.text.strip() == "👑 Top 10")
-async def handle_top_button(message: types.Message):
-    leaderboard = await db.get_leaderboard(10)
-    active_users = await db.get_active_users()
-    is_active = message.from_user.id in active_users
-    text = "👑 <b>TOP 10</b>\n"
-    for i, user in enumerate(leaderboard, 1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        text += f"{medal} <code>{user['user_id']}</code>: {user['balance']:,.0f} Ks\n"
-    await message.reply(text, reply_markup=get_main_reply_keyboard(is_active))
+def predict_golden_ratio(recent: list) -> str:
+    lookback = min(21, len(recent))
+    segment = recent[:lookback]
+    big_ratio = segment.count('BIG') / lookback
+    if big_ratio > 0.618:
+        return 'SMALL'
+    elif big_ratio < 0.382:
+        return 'BIG'
+    return recent[0]
 
 
-# ==========================================
-# 13. TARGET INPUT HANDLER
-# ==========================================
-user_target_input = {}
+def predict_momentum(recent: list) -> str:
+    weights = [5, 4, 3, 2, 1]
+    score = 0
+    for i, r in enumerate(recent[:5]):
+        if r == 'BIG':
+            score += weights[i]
+        else:
+            score -= weights[i]
+    if score > 3:
+        return 'BIG'
+    elif score < -3:
+        return 'SMALL'
+    return recent[0]
 
-@auth_router.callback_query(lambda c: c.data == "cmd_target")
-async def cb_target(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    user_target_input[user_id] = True
-    user = await db.get_user(user_id)
-    await callback.message.edit_text(
-        f"🎯 <b>Profit Target သတ်မှတ်ရန်</b>\n\n"
-        f"📌 လက်ရှိ: <b>{user.get('profit_target', 30000):,.0f} Ks</b>\n\n"
-        f"👇 <b>ပမာဏကို စာရိုက်ထည့်ပါ:</b>\n"
-        f"ဥပမာ: <code>30000</code> or <code>50000</code>\n\n"
-        f"ℹ️ Target ရောက်ရင် Auto-Stop ပါမည်။\n"
-        f"Cancel: <code>/cancel</code>"
+
+def predict_monte_carlo(recent: list) -> str:
+    big_prob = recent.count('BIG') / len(recent)
+    big_wins = sum(1 for _ in range(500) if random.random() < big_prob)
+    return 'BIG' if big_wins > 250 else 'SMALL'
+
+
+def predict_neural_pattern(recent: list) -> str:
+    if len(recent) < 6:
+        return recent[0]
+    current_window = recent[:3]
+    current_ratio = current_window.count('BIG') / 3
+    similar_big = similar_small = 0
+    for i in range(3, len(recent) - 1):
+        window = recent[i:i+3]
+        ratio = window.count('BIG') / 3
+        if abs(ratio - current_ratio) < 0.1:
+            if i + 3 < len(recent) and recent[i+3] == 'BIG':
+                similar_big += 1
+            else:
+                similar_small += 1
+    if similar_big + similar_small > 0:
+        return 'BIG' if similar_big > similar_small else 'SMALL'
+    return recent[0]
+
+
+def predict_quick_reversal(recent: list) -> str:
+    if len(recent) < 4:
+        return recent[0]
+    last_4 = recent[:4]
+    alts = sum(1 for i in range(1, len(last_4)) if last_4[i] != last_4[i-1])
+    alt_rate = alts / (len(last_4) - 1)
+    if alt_rate > 0.75:
+        return 'SMALL' if last_4[0] == 'BIG' else 'BIG'
+    return last_4[0]
+
+
+def predict_wave_analysis(recent: list) -> str:
+    if len(recent) < 6:
+        return recent[0]
+    waves = []
+    current = recent[0]
+    count = 1
+    for r in recent[1:10]:
+        if r == current:
+            count += 1
+        else:
+            waves.append((current, count))
+            current = r
+            count = 1
+    waves.append((current, count))
+    if len(waves) >= 3:
+        last_wave = waves[-1]
+        if last_wave[1] >= 3:
+            return last_wave[0]
+        elif last_wave[1] <= 2:
+            return 'SMALL' if last_wave[0] == 'BIG' else 'BIG'
+    return recent[0]
+
+
+def predict_chaos_theory(recent: list) -> str:
+    if len(recent) < 8:
+        return recent[0]
+    def entropy(seg):
+        total = len(seg)
+        big_p = seg.count('BIG') / total
+        small_p = seg.count('SMALL') / total
+        e = 0
+        for p in [big_p, small_p]:
+            if p > 0:
+                e -= p * math.log2(p)
+        return e
+    e3 = entropy(recent[:3])
+    e5 = entropy(recent[:5])
+    if e3 > e5:
+        return 'SMALL' if recent[0] == 'BIG' else 'BIG'
+    elif e3 < e5:
+        return 'BIG' if recent[:5].count('BIG') > recent[:5].count('SMALL') else 'SMALL'
+    return recent[0]
+
+
+def predict_ensemble(recent: list) -> str:
+    predictions = [
+        predict_pattern(recent), predict_martingale(recent),
+        predict_anti_martingale(recent), predict_trend(recent),
+        predict_fibonacci(recent), predict_golden_ratio(recent),
+        predict_momentum(recent), predict_quick_reversal(recent),
+    ]
+    big_votes = predictions.count('BIG')
+    small_votes = predictions.count('SMALL')
+    return 'BIG' if big_votes >= small_votes else 'SMALL'
+
+
+def predict_bayesian(recent: list) -> str:
+    if len(recent) < 8:
+        return recent[0]
+    big_after_big = small_after_small = 0
+    big_total = small_total = 0
+    for i in range(1, min(15, len(recent))):
+        if recent[i-1] == 'BIG':
+            big_total += 1
+            if recent[i] == 'BIG':
+                big_after_big += 1
+        else:
+            small_total += 1
+            if recent[i] == 'SMALL':
+                small_after_small += 1
+    p_bb = big_after_big / big_total if big_total > 0 else 0.5
+    p_ss = small_after_small / small_total if small_total > 0 else 0.5
+    if recent[0] == 'BIG':
+        return 'BIG' if p_bb > 0.5 else 'SMALL'
+    return 'SMALL' if p_ss > 0.5 else 'BIG'
+
+
+def predict_markov_chain(recent: list) -> str:
+    if len(recent) < 6:
+        return recent[0]
+    transitions = {}
+    for i in range(2, len(recent)):
+        state = (recent[i-2], recent[i-1])
+        next_val = recent[i]
+        if state not in transitions:
+            transitions[state] = {"BIG": 0, "SMALL": 0}
+        transitions[state][next_val] += 1
+    current_state = (recent[1], recent[0])
+    if current_state in transitions:
+        counts = transitions[current_state]
+        total = counts["BIG"] + counts["SMALL"]
+        if total > 0:
+            return 'BIG' if counts["BIG"] / total > 0.5 else 'SMALL'
+    return recent[0]
+
+
+def predict_ml_style(recent: list) -> str:
+    if len(recent) < 10:
+        return recent[0]
+    last_3 = recent[:3].count('BIG') / 3
+    last_5 = recent[:5].count('BIG') / 5
+    last_8 = recent[:8].count('BIG') / 8
+    trend = recent[:4].count('BIG') / 4 - last_8
+    score = (last_3 - 0.5) * 0.4 + (last_5 - 0.5) * 0.3 + (last_8 - 0.5) * 0.2 + trend * 0.1
+    return 'BIG' if score > 0 else 'SMALL'
+
+# ==========================================================
+# Login Flow
+# ==========================================================
+@dp.message(F.text == "Login")
+async def login_start(message: types.Message, state: FSMContext):
+    await state.set_state(LoginForm.enter_phone)
+    await message.answer(
+        f"{Emoji.INFO} <b>Enter your phone number:</b>\n"
+        "Example: <code>959675323878</code>",
+        reply_markup=ReplyKeyboardRemove()
     )
-    await callback.answer()
 
 
-@auth_router.message(lambda m: m.text and m.text.strip().isdigit() and m.from_user.id in user_target_input)
-async def handle_target_input(message: types.Message):
-    user_id = message.from_user.id
-    if user_id not in user_target_input:
-        return
-    try:
-        target = float(message.text.strip())
-        if target <= 0:
-            await message.reply("❌ 0 ထက်ကြီးရပါမည်။", reply_markup=get_main_reply_keyboard(False))
-            return
-        await db.update_profit_target(user_id, target)
-        del user_target_input[user_id]
-        active_users = await db.get_active_users()
-        is_active = user_id in active_users
-        await message.reply(
-            f"✅ <b>Profit Target သတ်မှတ်ပြီး!</b>\n🎯 Target: <b>{target:,.0f} Ks</b>",
-            reply_markup=get_main_reply_keyboard(is_active)
-        )
-    except ValueError:
-        await message.reply("❌ ဂဏန်းများသာထည့်ပါ။", reply_markup=get_main_reply_keyboard(False))
+@dp.message(LoginForm.enter_phone)
+async def process_phone(message: types.Message, state: FSMContext):
+    phone = message.text.strip()
+    if not phone.isdigit():
+        return await message.answer(f"{Emoji.CROSS} Numbers only!")
+    await state.update_data(phone=phone)
+    await state.set_state(LoginForm.enter_password)
+    await message.answer(f"{Emoji.KEY} <b>Enter your password:</b>")
 
 
-@auth_router.message(Command("cancel"))
-async def cmd_cancel(message: types.Message):
-    user_id = message.from_user.id
-    if user_id in user_target_input:
-        del user_target_input[user_id]
-    if user_id in user_betsize_input:
-        del user_betsize_input[user_id]
-    active_users = await db.get_active_users()
-    await message.reply("✅ Cancelled.", reply_markup=get_main_reply_keyboard(user_id in active_users))
-
-
-# ==========================================
-# 14. INLINE KEYBOARD CALLBACK HANDLERS
-# ==========================================
-@auth_router.callback_query(lambda c: c.data and c.data.startswith("usermode_"))
-async def cb_user_mode_select(callback: types.CallbackQuery):
-    mode_key = callback.data.replace("usermode_", "")
-    if mode_key in AI_MODES:
-        await db.update_user_ai_mode(callback.from_user.id, mode_key)
-        await callback.message.edit_text(
-            f"✅ <b>AI Mode ပြောင်းပြီး!</b>\n🧠 {AI_MODES[mode_key]['name']}\nℹ️ {AI_MODES[mode_key]['desc']}"
-        )
-        await callback.answer(f"✅ {AI_MODES[mode_key]['name']}")
-
-
-@auth_router.callback_query(lambda c: c.data == "cmd_compare")
-async def cb_compare(callback: types.CallbackQuery):
-    await callback.answer("Comparing...")
-    history_docs = await db.get_history(100)
-    if len(history_docs) < 20:
-        await callback.message.edit_text("Data မလုံလောက်သေးပါ။")
-        return
-    test_docs = history_docs[:80]
-    results = {}
-    for mode_key, mode_info in AI_MODES.items():
-        correct = total = 0
-        for i in range(len(test_docs) - 10):
-            segment = test_docs[i + 10:i:-1]
-            if len(segment) >= 10:
+@dp.message(LoginForm.enter_password)
+async def process_password(message: types.Message, state: FSMContext):
+    password = message.text
+    data = await state.get_data()
+    username = data.get('phone')
+    
+    loading_msg = await message.answer(f"{Emoji.HOURGLASS} <b>Logging in... Please wait...</b>")
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+        context = await browser.new_context(viewport={'width': 390, 'height': 844}, is_mobile=True)
+        page = await context.new_page()
+        
+        try:
+            await page.goto("https://www.777bigwingame.app/#/login", wait_until="networkidle", timeout=60000)
+            await page.wait_for_timeout(3000)
+            
+            js_code = """
+            ([user, pwd]) => {
+                function fillVueInput(element, value) {
+                    if (!element) return false;
+                    const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                    nativeSetter.call(element, value);
+                    element.dispatchEvent(new Event('input', { bubbles: true }));
+                    element.blur();
+                    return true;
+                }
+                let phone = document.querySelector('input[name="userNumber"]');
+                fillVueInput(phone, user);
+                let pass = document.querySelector('input[placeholder="Password"]') || 
+                           document.querySelector('input[placeholder="စကားဝှက်"]') || 
+                           document.querySelector('.passwordInput__container-input input');
+                fillVueInput(pass, pwd);
+            }
+            """
+            await page.evaluate(js_code, [username, password])
+            await page.wait_for_timeout(1000)
+            
+            await page.evaluate("() => { let btn = document.querySelector('button.active'); if (btn) btn.click(); }")
+            await page.wait_for_timeout(5000)
+            
+            if "login" not in page.url.lower():
+                session_file = f"session_{message.from_user.id}.json"
+                await context.storage_state(path=session_file)
+                USER_SESSIONS[message.from_user.id] = session_file
+                
                 try:
-                    pred_size, _, _, _ = mode_info["func"](segment)
-                    if pred_size == test_docs[i].get("size", "BIG"):
-                        correct += 1
-                    total += 1
+                    await page.goto("https://www.777bigwingame.app/#/main", wait_until="networkidle")
+                    await page.wait_for_timeout(3000)
                 except:
                     pass
-        results[mode_key] = {"name": mode_info["name"], "accuracy": (correct / total * 100) if total > 0 else 0}
-    sorted_results = sorted(results.items(), key=lambda x: x[1]["accuracy"], reverse=True)
-    text = "📊 <b>AI COMPARISON (Top 5)</b>\n"
-    for i, (key, data) in enumerate(sorted_results[:5], 1):
-        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else f"{i}."
-        text += f"{medal} {data['name']}: {data['accuracy']:.1f}%\n"
-    await callback.message.edit_text(text)
-
-
-@auth_router.callback_query(lambda c: c.data == "cmd_addbal")
-async def cb_addbal(callback: types.CallbackQuery):
-    await callback.message.edit_text("💎 <b>ငွေထည့်ရန်</b>\n👇 ပမာဏရွေးပါ:", reply_markup=get_add_balance_keyboard())
-    await callback.answer()
-
-
-@auth_router.callback_query(lambda c: c.data and c.data.startswith("addbal_"))
-async def cb_process_addbal(callback: types.CallbackQuery):
-    amount = float(callback.data.replace("addbal_", ""))
-    user = await db.update_balance(callback.from_user.id, amount, "add")
-    await callback.message.edit_text(f"✅ +{amount:,.0f} Ks\n💰 Balance: {user['balance']:,.0f} Ks")
-    await callback.answer(f"✅ +{amount:,} Ks")
-
-
-@auth_router.callback_query(lambda c: c.data == "cmd_withdraw")
-async def cb_withdraw(callback: types.CallbackQuery):
-    await callback.message.edit_text("💵 <b>ငွေနှုတ်ရန်</b>\n👇 ပမာဏရွေးပါ:", reply_markup=get_withdraw_keyboard())
-    await callback.answer()
-
-
-@auth_router.callback_query(lambda c: c.data and c.data.startswith("withdraw_"))
-async def cb_process_withdraw(callback: types.CallbackQuery):
-    data = callback.data.replace("withdraw_", "")
-    user = await db.get_user(callback.from_user.id)
-    amount = user['balance'] if data == "all" else float(data)
-    if amount > user['balance']:
-        await callback.answer("Not enough!", show_alert=True)
-        return
-    await db.update_balance(callback.from_user.id, amount, "subtract")
-    updated = await db.get_user(callback.from_user.id)
-    await callback.message.edit_text(f"✅ -{amount:,.0f} Ks\n💰 Balance: {updated['balance']:,.0f} Ks")
-    await callback.answer(f"✅ -{amount:,} Ks")
-
-
-# ==========================================
-# 15. BET SIZE HANDLERS
-# ==========================================
-@auth_router.callback_query(lambda c: c.data == "cmd_betsize")
-async def cb_betsize(callback: types.CallbackQuery):
-    """Show Bet Size options"""
-    user_session = await db.get_user_session(callback.from_user.id)
-    current_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
-    current_str = " → ".join([f"{b:,}" for b in current_seq])
-
-    await callback.message.edit_text(
-        f"💲 <b>Bet Size သတ်မှတ်ရန်</b>\n\n"
-        f"📌 လက်ရှိ: <b>{current_str}</b> ({len(current_seq)} ဆင့်)\n\n"
-        f"👇 Preset ရွေးပါ သို့မဟုတ် Custom ထည့်ပါ:",
-        reply_markup=get_betsize_inline_keyboard(current_seq)
-    )
-    await callback.answer()
-
-
-@auth_router.callback_query(lambda c: c.data and c.data.startswith("setbetsize_"))
-async def cb_set_betsize(callback: types.CallbackQuery):
-    """Process preset bet size selection"""
-    parts = callback.data.replace("setbetsize_", "").split("_")
-    bet_seq = [int(x) for x in parts]
-
-    await db.user_sessions.update_one(
-        {"user_id": callback.from_user.id},
-        {"$set": {"bet_sequence": bet_seq}},
-        upsert=True
-    )
-
-    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
-
-    await callback.message.edit_text(
-        f"✅ <b>Bet Size သတ်မှတ်ပြီး!</b>\n\n"
-        f"💲 Sequence ({len(bet_seq)} ဆင့်): <b>{bet_str}</b>\n\n"
-        f"🔄 နောက်ဆုံးအဆင့် ({bet_seq[-1]:,}) ထိရှုံးရင် {bet_seq[0]:,} ကနေ Auto Reset ပါမည်။",
-        reply_markup=get_settings_inline_keyboard()
-    )
-    await callback.answer(f"✅ Bet Size Updated! ({len(bet_seq)} steps)")
-
-
-# Bet Size Custom Input State
-user_betsize_input = {}
-
-@auth_router.callback_query(lambda c: c.data == "betsize_custom")
-async def cb_betsize_custom(callback: types.CallbackQuery):
-    """Start custom bet size input"""
-    user_id = callback.from_user.id
-    user_betsize_input[user_id] = True
-
-    user_session = await db.get_user_session(user_id)
-    current_seq = user_session.get("bet_sequence", DEFAULT_BET_SEQUENCE)
-    current_str = " → ".join([f"{b:,}" for b in current_seq])
-
-    await callback.message.edit_text(
-        f"✏️ <b>Custom Bet Size သတ်မှတ်ရန်</b>\n\n"
-        f"📌 လက်ရှိ ({len(current_seq)} ဆင့်): <b>{current_str}</b>\n\n"
-        f"👇 <b>အောက်ပါပုံစံအတိုင်း စာရိုက်ထည့်ပါ:</b>\n"
-        f"<code>100-300-900-2700-8100-24300</code>\n\n"
-        f"ℹ️ ဂဏန်းများ dash (-) ခြားပြီးထည့်ပါ။\n"
-        f"ℹ️ နောက်ဆုံးအဆင့်ထိရှုံးရင် ပထမအဆင့်ကနေ Auto Reset ပါမည်။\n"
-        f"Cancel: <code>/cancel</code>"
-    )
-    await callback.answer()
-
-
-@auth_router.message(lambda m: m.text and '-' in m.text and m.from_user.id in user_betsize_input)
-async def handle_betsize_input(message: types.Message):
-    """Process custom bet size input"""
-    user_id = message.from_user.id
-
-    if user_id not in user_betsize_input:
-        return
-
-    try:
-        parts = message.text.strip().split('-')
-        if len(parts) < 2:
-            await message.reply("❌ အနည်းဆုံး ၂ ဆင့်ထည့်ပါ။ ဥပမာ: 100-300")
-            return
-
-        bet_seq = []
-        for p in parts:
-            val = float(p.strip().replace(',', ''))
-            if val <= 0:
-                await message.reply("❌ 0 ထက်ကြီးရပါမည်။")
-                return
-            bet_seq.append(val)
-
-        await db.user_sessions.update_one(
-            {"user_id": user_id},
-            {"$set": {"bet_sequence": bet_seq}},
-            upsert=True
-        )
-
-        del user_betsize_input[user_id]
-
-        bet_str = " → ".join([f"{b:,.0f}" for b in bet_seq])
-
-        active_users = await db.get_active_users()
-        is_active = user_id in active_users
-
-        await message.reply(
-            f"✅ <b>Custom Bet Size သတ်မှတ်ပြီး!</b>\n\n"
-            f"💲 Sequence ({len(bet_seq)} ဆင့်): <b>{bet_str}</b>\n\n"
-            f"🔄 နောက်ဆုံးအဆင့် ({bet_seq[-1]:,.0f}) ထိရှုံးရင် {bet_seq[0]:,.0f} ကနေ Auto Reset ပါမည်။",
-            reply_markup=get_main_reply_keyboard(is_active)
-        )
-
-    except ValueError:
-        await message.reply("❌ ဂဏန်းများသာထည့်ပါ။ ဥပမာ: 100-300-900-2700-8100-24300")
-
-
-@auth_router.callback_query(lambda c: c.data == "cmd_back")
-async def cb_back(callback: types.CallbackQuery):
-    user = await db.get_user(callback.from_user.id)
-    active_users = await db.get_active_users()
-    is_active = callback.from_user.id in active_users
-    user_session = await db.get_user_session(callback.from_user.id)
-    user_ai_mode = user_session.get("ai_mode", DEFAULT_AI_MODE)
-    await callback.message.edit_text(
-        f"✨ <b>WIN GO AI Bot v4.0</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Balance: {user['balance']:,.0f} Ks\n"
-        f"🟢 Status: {'Active' if is_active else 'Inactive'}\n"
-        f"🧠 AI: {AI_MODES.get(user_ai_mode, {}).get('name', 'AI')}\n"
-        f"🎯 Target: {user.get('profit_target', 30000):,.0f} Ks\n\n"
-        f"👇 Keyboard ကိုသုံးပါ:"
-    )
-    await callback.answer()
-
-
-# ==========================================
-# 16. OWNER ONLY COMMANDS
-# ==========================================
-@owner_router.message(Command("addsudo"))
-@owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.addsudo', '/addsudo'])
-async def cmd_add_sudo(message: types.Message):
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            await message.reply("<code>/addsudo [user_id]</code> or <code>.addsudo [user_id]</code>")
-            return
-        target_id = int(parts[1])
-        await db.add_sudo(target_id, message.from_user.id)
-        global SUDO_USERS
-        SUDO_USERS = await db.get_sudo_users()
-        await message.reply(f"✅ Sudo Added: <code>{target_id}</code>")
-    except ValueError:
-        await message.reply("❌ User ID ဂဏန်းသာထည့်ပါ။")
-
-
-@owner_router.message(Command("delsudo"))
-@owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.delsudo', '/delsudo'])
-async def cmd_del_sudo(message: types.Message):
-    try:
-        parts = message.text.split()
-        if len(parts) < 2:
-            await message.reply("<code>/delsudo [user_id]</code> or <code>.delsudo [user_id]</code>")
-            return
-        target_id = int(parts[1])
-        await db.remove_sudo(target_id)
-        global SUDO_USERS
-        SUDO_USERS = await db.get_sudo_users()
-        await message.reply(f"✅ Sudo Removed: <code>{target_id}</code>")
-    except ValueError:
-        await message.reply("❌ User ID ဂဏန်းသာထည့်ပါ။")
-
-
-@owner_router.message(Command("give"))
-@owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.give'))
-async def cmd_give_balance(message: types.Message):
-    """Owner မှ User ကို Balance ထည့်ပေးရန်"""
-    try:
-        parts = message.text.split()
-        if len(parts) < 3:
-            await message.reply(
-                "❌ <b>အသုံးပြုနည်း:</b>\n"
-                "<code>/give [user_id] [amount]</code>\n"
-                "<code>.give [user_id] [amount]</code>\n\n"
-                "ဥပမာ: <code>.give 123456789 50000</code>"
+                
+                nickname, user_id, balance_text = "Unknown", "N/A", "0.00 Ks"
+                login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                
+                try:
+                    nick_el = page.locator('.userInfo__container-content-nickname h3').first
+                    if await nick_el.is_visible(timeout=3000):
+                        nickname = await nick_el.inner_text()
+                    uid_el = page.locator('.userInfo__container-content-uid span:nth-child(3)').first
+                    if await uid_el.is_visible():
+                        user_id = await uid_el.inner_text()
+                    bal_el = page.locator('.balance_info p.totalSavings__container-header__subtitle span').first
+                    if await bal_el.is_visible():
+                        balance_text = await bal_el.inner_text()
+                except:
+                    pass
+                
+                await state.update_data(
+                    is_logged_in=True,
+                    is_real_logged=True,
+                    username=username,
+                    user_id=user_id.strip(),
+                    nickname=nickname.strip(),
+                    balance=balance_text.strip(),
+                    login_time=login_time,
+                    bet_sequence=DEFAULT_BET_SEQUENCE.copy(),
+                    ai_mode=DEFAULT_AI_MODE,
+                    profit_target=DEFAULT_PROFIT_TARGET,
+                )
+                
+                await state.set_state(LoginForm.main_menu)
+                await loading_msg.delete()
+                await message.answer(
+                    f"{Emoji.CHECK} <b>LOGIN SUCCESSFUL!</b>\n\n"
+                    f"{Emoji.USER} Nickname: <b>{nickname}</b>\n"
+                    f"{Emoji.MONEY_ICON} Real Balance: <b>{balance_text}</b>\n\n"
+                    f"{Emoji.BRAIN} 16 AI Modes + Browser Betting Ready!",
+                    reply_markup=get_logged_in_keyboard(is_real_logged=True)
+                )
+            else:
+                await loading_msg.delete()
+                await message.answer(
+                    f"{Emoji.CROSS} <b>Login failed!</b>",
+                    reply_markup=get_main_keyboard()
+                )
+                await state.clear()
+        except Exception as e:
+            await loading_msg.delete()
+            await message.answer(
+                f"{Emoji.WARNING} Error: {html.escape(str(e))}",
+                reply_markup=get_main_keyboard()
             )
-            return
-        target_id = int(parts[1])
-        amount = float(parts[2])
-        if amount <= 0:
-            await message.reply("❌ 0 ထက်ကြီးရပါမည်။")
-            return
-        receiver = await db.update_balance(target_id, amount, "add")
-        await message.reply(
-            f"✅ <b>ငွေထည့်ပေးပြီးပါပြီ!</b>\n\n"
-            f"👤 User: <code>{target_id}</code>\n"
-            f"💵 +{amount:,.0f} Ks\n"
-            f"💰 Balance: {receiver['balance']:,.0f} Ks"
+            await state.clear()
+        finally:
+            await browser.close()
+
+# ==========================================================
+# Main Menu Handlers
+# ==========================================================
+@dp.message(LoginForm.main_menu, F.text == "Info")
+async def show_info(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    is_real = data.get('is_real_logged', False)
+    vbal = get_virtual_balance(message.from_user.id)
+    bet_seq = data.get('bet_sequence', DEFAULT_BET_SEQUENCE)
+    
+    info_text = f"{Emoji.INFO} <b>=== User Info ===</b>\n\n"
+    
+    if is_real:
+        info_text += (
+            f"{Emoji.SHIELD} <b>[Real Mode]</b>\n"
+            f"{Emoji.USER} {data.get('nickname', 'Unknown')}\n"
+            f"ID: {data.get('user_id', 'N/A')}\n"
+            f"{Emoji.MONEY_ICON} Real Balance: {data.get('balance', '0.00')}\n\n"
         )
-        try:
-            await bot.send_message(
-                chat_id=target_id,
-                text=f"🎁 <b>ငွေထည့်ပေးခြင်းခံရပါသည်!</b>\n━━━━━━━━━━━━━━━━━━\n💵 +{amount:,.0f} Ks\n💰 Balance: {receiver['balance']:,.0f} Ks\n━━━━━━━━━━━━━━━━━━\n👑 Owner မှ ထည့်ပေးခြင်းဖြစ်ပါသည်။"
-            )
-        except:
-            pass
-    except ValueError:
-        await message.reply("❌ <code>.give [user_id] [amount]</code> ပုံစံဖြင့်ထည့်ပါ။")
+    
+    info_text += (
+        f"{Emoji.GAME} <b>[Virtual Mode]</b>\n"
+        f"{Emoji.MONEY_ICON} Balance: {vbal['balance']:,.0f} Ks\n"
+        f"{Emoji.CHART_UP} Session Profit: {vbal['session_profit']:,.0f} Ks\n"
+        f"{Emoji.CHECK} Wins: {vbal['total_wins']} | {Emoji.CROSS} Losses: {vbal['total_losses']}\n\n"
+        f"{Emoji.MONEY_BAG} Bet Size: {' -> '.join([str(b) for b in bet_seq])}\n"
+        f"{Emoji.BRAIN} AI Mode: {data.get('ai_mode', DEFAULT_AI_MODE)}\n"
+        f"{Emoji.TARGET} Target: {data.get('profit_target', DEFAULT_PROFIT_TARGET):,} Ks\n"
+    )
+    
+    await message.answer(info_text, reply_markup=get_logged_in_keyboard(is_real))
 
 
-@owner_router.message(Command("take"))
-@owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.take'))
-async def cmd_take_balance(message: types.Message):
-    """Owner မှ User Balance ပြန်နှုတ်ရန်"""
-    try:
-        parts = message.text.split()
-        if len(parts) < 3:
-            await message.reply(
-                "❌ <b>အသုံးပြုနည်း:</b>\n"
-                "<code>/take [user_id] [amount]</code>\n"
-                "<code>.take [user_id] [amount]</code>\n\n"
-                "ဥပမာ: <code>.take 123456789 50000</code>"
-            )
-            return
-        target_id = int(parts[1])
-        amount = float(parts[2])
-        if amount <= 0:
-            await message.reply("❌ 0 ထက်ကြီးရပါမည်။")
-            return
-        user = await db.get_user(target_id)
-        if amount > user['balance']:
-            await message.reply(f"❌ လက်ကျန်ငွေ မလုံလောက်ပါ!\n💰 Balance: {user['balance']:,.0f} Ks")
-            return
-        updated = await db.update_balance(target_id, amount, "subtract")
-        await message.reply(
-            f"✅ <b>ငွေနှုတ်ပြီးပါပြီ!</b>\n\n"
-            f"👤 User: <code>{target_id}</code>\n"
-            f"💵 -{amount:,.0f} Ks\n"
-            f"💰 Balance: {updated['balance']:,.0f} Ks"
-        )
-        try:
-            await bot.send_message(
-                chat_id=target_id,
-                text=f"⚠️ <b>ငွေနှုတ်ယူခြင်းခံရပါသည်!</b>\n━━━━━━━━━━━━━━━━━━\n💵 -{amount:,.0f} Ks\n💰 Balance: {updated['balance']:,.0f} Ks"
-            )
-        except:
-            pass
-    except ValueError:
-        await message.reply("❌ <code>.take [user_id] [amount]</code> ပုံစံဖြင့်ထည့်ပါ။")
-
-
-@owner_router.message(Command("setbal"))
-@owner_router.message(lambda m: m.text and m.text.lower().strip().startswith('.setbal'))
-async def cmd_set_balance(message: types.Message):
-    """Owner မှ User Balance သတ်မှတ်ရန်"""
-    try:
-        parts = message.text.split()
-        if len(parts) == 2:
-            amount = float(parts[1])
-            if amount < 0:
-                await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။")
-                return
-            user = await db.update_balance(message.from_user.id, amount, "set")
-            await message.reply(f"✅ Balance: <b>{user['balance']:,.0f} Ks</b>")
-        elif len(parts) == 3:
-            target_id = int(parts[1])
-            amount = float(parts[2])
-            if amount < 0:
-                await message.reply("❌ 0 သို့မဟုတ် အပေါင်းကိန်းဖြစ်ရပါမည်။")
-                return
-            user = await db.update_balance(target_id, amount, "set")
-            await message.reply(f"✅ User <code>{target_id}</code> Balance: <b>{user['balance']:,.0f} Ks</b>")
+@dp.message(LoginForm.main_menu, F.text == "Balance")
+async def check_balance(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    is_real = data.get('is_real_logged', False)
+    vbal = get_virtual_balance(message.from_user.id)
+    
+    if is_real:
+        session_file = USER_SESSIONS.get(message.from_user.id, f"session_{message.from_user.id}.json")
+        if os.path.exists(session_file):
+            msg = await message.answer(f"{Emoji.HOURGLASS} Checking live balance...")
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=True, args=['--no-sandbox'])
+                context = await browser.new_context(storage_state=session_file, viewport={'width': 390, 'height': 844}, is_mobile=True)
+                page = await context.new_page()
+                try:
+                    await page.goto("https://www.777bigwingame.app/#/main", wait_until="networkidle")
+                    await page.wait_for_timeout(3000)
+                    bal_el = page.locator('.balance_info p.totalSavings__container-header__subtitle span').first
+                    if await bal_el.is_visible(timeout=3000):
+                        live_bal = await bal_el.inner_text()
+                        await state.update_data(balance=live_bal)
+                        await msg.edit_text(
+                            f"{Emoji.MONEY_ICON} <b>Real Balance:</b> {live_bal}\n"
+                            f"{Emoji.GAME} <b>Virtual Balance:</b> {vbal['balance']:,.0f} Ks\n"
+                            f"{Emoji.CHART_UP} Virtual Profit: {vbal['session_profit']:,.0f} Ks"
+                        )
+                    else:
+                        await msg.edit_text(f"{Emoji.WARNING} Balance not found.")
+                finally:
+                    await browser.close()
         else:
-            await message.reply("<code>/setbal 50000</code> or <code>.setbal 50000</code>\n<code>/setbal [id] 50000</code> or <code>.setbal [id] 50000</code>")
-    except ValueError:
-        await message.reply("❌ ဂဏန်းများသာ ထည့်ပါ။")
+            await message.answer(
+                f"{Emoji.CROSS} Real: No session.\n"
+                f"{Emoji.MONEY_ICON} Virtual Balance: {vbal['balance']:,.0f} Ks"
+            )
+    else:
+        await message.answer(
+            f"{Emoji.MONEY_ICON} <b>Virtual Balance:</b> {vbal['balance']:,.0f} Ks\n"
+            f"{Emoji.CHART_UP} Session Profit: {vbal['session_profit']:,.0f} Ks\n"
+            f"{Emoji.CHECK} Wins: {vbal['total_wins']} | {Emoji.CROSS} Losses: {vbal['total_losses']}"
+        )
 
 
-@owner_router.message(Command("sudolist"))
-@owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.sudolist', '/sudolist'])
-async def cmd_sudo_list(message: types.Message):
-    global SUDO_USERS
-    if not SUDO_USERS:
-        await message.reply("📋 No sudo users.")
-        return
-    text = "🛡️ <b>SUDO USERS</b>\n"
-    for i, uid in enumerate(SUDO_USERS, 1):
-        text += f"{i}. <code>{uid}</code>\n"
-    await message.reply(text)
+@dp.message(LoginForm.main_menu, F.text == "Bet Size")
+async def set_bet_size_start(message: types.Message, state: FSMContext):
+    await state.set_state(LoginForm.set_bet_size)
+    data = await state.get_data()
+    current_seq = data.get('bet_sequence', DEFAULT_BET_SEQUENCE)
+    current_str = " -> ".join([str(b) for b in current_seq])
+    
+    await message.answer(
+        f"{Emoji.MONEY_BAG} <b>Set Bet Size</b>\n\n"
+        f"Current: <b>{current_str}</b>\n\n"
+        f"Enter amounts separated by '-':\n"
+        f"<code>100-300-900-2700-8100-24300</code>",
+        reply_markup=ReplyKeyboardRemove()
+    )
 
 
-# ==========================================
-# 17. INITIALIZATION & MAIN
-# ==========================================
-async def init_system():
-    global DEFAULT_AI_MODE, SUDO_USERS
-    await db.init_indexes()
-    SUDO_USERS = await db.get_sudo_users()
-    DEFAULT_AI_MODE = await db.get_setting("default_ai_mode", "ensemble")
-    print(f"✅ System Ready | AI: {DEFAULT_AI_MODE} | Sudo: {len(SUDO_USERS)}")
+@dp.message(LoginForm.set_bet_size)
+async def set_bet_size_save(message: types.Message, state: FSMContext):
+    try:
+        amounts = [int(x.strip()) for x in message.text.strip().split('-')]
+        if len(amounts) < 2:
+            return await message.answer(f"{Emoji.CROSS} Minimum 2 steps required.")
+        await state.update_data(bet_sequence=amounts)
+        await state.set_state(LoginForm.main_menu)
+        data = await state.get_data()
+        is_real = data.get('is_real_logged', False)
+        await message.answer(
+            f"{Emoji.CHECK} Bet Size: {' -> '.join([str(a) for a in amounts])}",
+            reply_markup=get_logged_in_keyboard(is_real)
+        )
+    except:
+        await message.answer(f"{Emoji.CROSS} Invalid format. Use numbers separated by '-'.")
 
 
+@dp.message(LoginForm.main_menu, F.text == "AI Mode")
+async def show_ai_modes(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    current_ai = data.get('ai_mode', DEFAULT_AI_MODE)
+    await message.answer(
+        f"{Emoji.BRAIN} <b>Select AI Mode (16 Modes)</b>\n"
+        f"Current: <b>{current_ai}</b>",
+        reply_markup=get_ai_mode_keyboard()
+    )
+
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("ai_") and c.data != "ai_close")
+async def select_ai_mode(callback: types.CallbackQuery, state: FSMContext):
+    ai_mode = callback.data.replace("ai_", "")
+    ai_names = {
+        "pattern": "Pattern AI", "martingale": "Martingale AI",
+        "anti_martingale": "Anti-Martingale", "trend_following": "Trend Following",
+        "fibonacci": "Fibonacci AI", "golden_ratio": "Golden Ratio",
+        "momentum": "Momentum AI", "monte_carlo": "Monte Carlo",
+        "neural_pattern": "Neural Pattern", "quick_reversal": "Quick Reversal",
+        "wave_analysis": "Wave Analysis", "chaos_theory": "Chaos Theory",
+        "ensemble": "Ensemble AI", "bayesian": "Bayesian AI",
+        "markov_chain": "Markov Chain", "ml_style": "ML Style AI",
+    }
+    await state.update_data(ai_mode=ai_mode)
+    await callback.message.edit_text(f"{Emoji.CHECK} AI Mode: <b>{ai_names.get(ai_mode, ai_mode)}</b>")
+    await callback.answer(f"Selected: {ai_names.get(ai_mode, ai_mode)}")
+
+
+@dp.callback_query(lambda c: c.data == "ai_close")
+async def close_ai_menu(callback: types.CallbackQuery):
+    await callback.message.delete()
+    await callback.answer()
+
+
+@dp.message(LoginForm.main_menu, F.text == "Set Target")
+async def set_target_start(message: types.Message, state: FSMContext):
+    await state.set_state(LoginForm.set_target)
+    data = await state.get_data()
+    current_target = data.get('profit_target', DEFAULT_PROFIT_TARGET)
+    await message.answer(
+        f"{Emoji.TARGET} <b>Set Profit Target</b>\n"
+        f"Current: <b>{current_target:,} Ks</b>\n\n"
+        f"Enter amount:\n<code>30000</code>",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+
+@dp.message(LoginForm.set_target)
+async def set_target_save(message: types.Message, state: FSMContext):
+    try:
+        target = int(message.text.strip())
+        if target <= 0:
+            return await message.answer(f"{Emoji.CROSS} Must be greater than 0.")
+        await state.update_data(profit_target=target)
+        await state.set_state(LoginForm.main_menu)
+        data = await state.get_data()
+        is_real = data.get('is_real_logged', False)
+        await message.answer(
+            f"{Emoji.CHECK} Target: <b>{target:,} Ks</b>",
+            reply_markup=get_logged_in_keyboard(is_real)
+        )
+    except:
+        await message.answer(f"{Emoji.CROSS} Numbers only.")
+
+
+@dp.message(LoginForm.main_menu, F.text == "Status")
+async def show_status(message: types.Message, state: FSMContext):
+    global is_bot_running
+    data = await state.get_data()
+    is_real = data.get('is_real_logged', False)
+    vbal = get_virtual_balance(message.from_user.id)
+    
+    status_text = (
+        f"{Emoji.BAR_CHART} <b>=== System Status ===</b>\n\n"
+        f"{Emoji.ROBOT} Auto-Bet: {'RUNNING' if is_bot_running else 'STOPPED'}\n"
+        f"{Emoji.SHIELD} Real Mode: {'Logged In' if is_real else 'Not Logged'}\n"
+        f"{Emoji.MONEY_ICON} Virtual Balance: {vbal['balance']:,.0f} Ks\n"
+        f"{Emoji.CHART_UP} Virtual Profit: {vbal['session_profit']:,.0f} Ks\n"
+        f"{Emoji.BRAIN} AI: {data.get('ai_mode', DEFAULT_AI_MODE)}\n"
+        f"{Emoji.TARGET} Target: {data.get('profit_target', DEFAULT_PROFIT_TARGET):,} Ks\n"
+        f"{Emoji.MONEY_BAG} Bet Size: {' -> '.join([str(b) for b in data.get('bet_sequence', DEFAULT_BET_SEQUENCE)])}\n"
+    )
+    await message.answer(status_text, reply_markup=get_logged_in_keyboard(is_real))
+
+
+@dp.message(LoginForm.main_menu, F.text == "Logout")
+async def logout(message: types.Message, state: FSMContext):
+    await state.clear()
+    session_file = f"session_{message.from_user.id}.json"
+    if os.path.exists(session_file):
+        os.remove(session_file)
+    USER_SESSIONS.pop(message.from_user.id, None)
+    await message.answer(
+        f"{Emoji.CHECK} Logged out successfully.",
+        reply_markup=get_main_keyboard()
+    )
+
+
+# ==========================================================
+# VIRTUAL AUTO-BET MODE
+# ==========================================================
+@dp.message(F.text == "Virtual Auto-Bet")
+async def start_virtual_autobet(message: types.Message, state: FSMContext):
+    global is_bot_running
+    
+    if is_bot_running:
+        return await message.answer(f"{Emoji.WARNING} Auto-Bet is already running!")
+    
+    current_state = await state.get_state()
+    if current_state != LoginForm.main_menu:
+        await state.set_state(LoginForm.main_menu)
+    
+    data = await state.get_data()
+    bet_sequence = data.get('bet_sequence', DEFAULT_BET_SEQUENCE)
+    profit_target = data.get('profit_target', DEFAULT_PROFIT_TARGET)
+    ai_mode = data.get('ai_mode', DEFAULT_AI_MODE)
+    
+    is_bot_running = True
+    status_msg = await message.answer(
+        f"{Emoji.GAME} <b>Virtual Auto-Bet Started!</b>\n"
+        f"{Emoji.BRAIN} AI Mode: {ai_mode}"
+    )
+    
+    asyncio.create_task(
+        run_virtual_betting_loop(message, status_msg, bet_sequence, profit_target, ai_mode)
+    )
+
+
+async def run_virtual_betting_loop(message, status_msg, bet_sequence, profit_target, ai_mode):
+    global is_bot_running
+    
+    vbal = get_virtual_balance(message.from_user.id)
+    current_step = 0
+    
+    # Get API history for AI prediction
+    async with aiohttp.ClientSession() as api_session:
+        while is_bot_running:
+            current_amount = bet_sequence[current_step]
+            
+            # Get prediction from API
+            history = await get_game_history(api_session)
+            if history and len(history) >= 5:
+                prediction = predict_next(history, ai_mode)
+            else:
+                prediction = DEFAULT_PATTERN[current_step % len(DEFAULT_PATTERN)]
+            
+            display_type = "BIG" if prediction == "BIG" else "SMALL"
+            
+            if vbal["balance"] < current_amount:
+                await message.answer(
+                    f"{Emoji.CROSS} <b>Insufficient Balance!</b>\n"
+                    f"{Emoji.MONEY_ICON} Balance: {vbal['balance']:,.0f} Ks\n"
+                    f"{Emoji.OFFLINE} Auto-bet stopped."
+                )
+                is_bot_running = False
+                break
+            
+            vbal["balance"] -= current_amount
+            
+            step_text = f"(Step {current_step + 1}/{len(bet_sequence)})"
+            await message.answer(
+                f"{Emoji.ORDER} <b>Virtual Bet Placed!</b>\n"
+                f"{Emoji.GAME_ICON} WINGO 30S: {display_type}\n"
+                f"{Emoji.CHART_ICON} Amount: <b>{current_amount} Ks</b> {step_text}\n"
+                f"{Emoji.BRAIN} AI ({ai_mode}): {prediction}\n"
+                f"{Emoji.MONEY_ICON} Balance: {vbal['balance']:,.0f} Ks\n"
+                f"{Emoji.HOURGLASS} Waiting for result..."
+            )
+            
+            await asyncio.sleep(30)
+            
+            won = random.random() < 0.5
+            
+            if won:
+                win_amount = current_amount * 1.96
+                profit = win_amount - current_amount
+                vbal["balance"] += win_amount
+                vbal["session_profit"] += profit
+                vbal["total_wins"] += 1
+                vbal["current_streak"] += 1
+                if vbal["current_streak"] > vbal["best_streak"]:
+                    vbal["best_streak"] = vbal["current_streak"]
+                
+                await message.answer(
+                    f"{Emoji.WIN_CHECK} <b>WIN!</b> +{profit:.0f} Ks\n"
+                    f"{Emoji.MONEY_ICON} Balance: {vbal['balance']:,.0f} Ks\n"
+                    f"{Emoji.CHART_UP} Session Profit: +{vbal['session_profit']:,.0f} Ks\n"
+                    f"{Emoji.UP} Reset to {bet_sequence[0]} Ks"
+                )
+                current_step = 0
+                
+                if vbal["session_profit"] >= profit_target:
+                    await message.answer(
+                        f"{Emoji.SPARKLES} <b>Target Reached!</b>\n"
+                        f"{Emoji.MONEY_ICON} +{vbal['session_profit']:,.0f} Ks\n"
+                        f"{Emoji.OFFLINE} Stopped."
+                    )
+                    is_bot_running = False
+                    break
+            else:
+                vbal["session_profit"] -= current_amount
+                vbal["total_losses"] += 1
+                vbal["current_streak"] = 0
+                current_step += 1
+                
+                if current_step >= len(bet_sequence):
+                    await message.answer(
+                        f"{Emoji.WARNING} <b>Sequence Lost!</b>\n"
+                        f"{Emoji.LOSS_ICON} Session: {vbal['session_profit']:,.0f} Ks\n"
+                        f"{Emoji.UP} Auto-reset to {bet_sequence[0]} Ks"
+                    )
+                    current_step = 0
+                else:
+                    await message.answer(
+                        f"{Emoji.LOSE_CROSS} <b>LOSE!</b> -{current_amount} Ks\n"
+                        f"{Emoji.MONEY_ICON} Balance: {vbal['balance']:,.0f} Ks\n"
+                        f"{Emoji.LOSS_ICON} Session: {vbal['session_profit']:,.0f} Ks\n"
+                        f"{Emoji.DOWN} Next: <b>{bet_sequence[current_step]} Ks</b>"
+                    )
+            
+            await asyncio.sleep(5)
+    
+    await message.answer(
+        f"{Emoji.OFFLINE} <b>Virtual Auto-Bet Stopped.</b>\n"
+        f"{Emoji.MONEY_ICON} Final Balance: {vbal['balance']:,.0f} Ks\n"
+        f"{Emoji.CHART_UP} Session P/L: {vbal['session_profit']:,.0f} Ks"
+    )
+
+
+# ==========================================================
+# REAL AUTO-BET MODE (API Prediction + Playwright Browser)
+# ==========================================================
+@dp.message(LoginForm.main_menu, F.text == "Real Auto-Bet")
+async def start_real_autobet(message: types.Message, state: FSMContext):
+    global is_bot_running
+    
+    if is_bot_running:
+        return await message.answer(f"{Emoji.WARNING} Auto-Bet is already running!")
+    
+    data = await state.get_data()
+    if not data.get('is_real_logged'):
+        return await message.answer(f"{Emoji.CROSS} Please Login first for Real Mode.")
+    
+    session_file = USER_SESSIONS.get(message.from_user.id, f"session_{message.from_user.id}.json")
+    if not os.path.exists(session_file):
+        return await message.answer(f"{Emoji.CROSS} Session not found. Please Login again.")
+    
+    bet_sequence = data.get('bet_sequence', DEFAULT_BET_SEQUENCE)
+    profit_target = data.get('profit_target', DEFAULT_PROFIT_TARGET)
+    ai_mode = data.get('ai_mode', DEFAULT_AI_MODE)
+    
+    is_bot_running = True
+    status_msg = await message.answer(
+        f"{Emoji.HOURGLASS} <b>Starting Real Auto-Bet...</b>\n"
+        f"{Emoji.BRAIN} AI Mode: {ai_mode} (16 modes)\n"
+        f"{Emoji.GAME} API Prediction + Browser Betting"
+    )
+    
+    asyncio.create_task(
+        run_real_betting_loop(
+            message, status_msg, session_file,
+            bet_sequence, profit_target, ai_mode
+        )
+    )
+
+
+async def place_bet_on_page(page, bet_type: str, amount: int) -> bool:
+    try:
+        if amount >= 1000 and amount % 1000 == 0:
+            base_amt = 1000
+        elif amount >= 100 and amount % 100 == 0:
+            base_amt = 100
+        else:
+            base_amt = 10
+        
+        multiplier = amount // base_amt
+        selector = "div.Betting__C-foot-b" if bet_type == "BIG" else "div.Betting__C-foot-s"
+        
+        await page.locator(selector).first.click()
+        await page.wait_for_timeout(1000)
+        await page.locator(f"div.Betting__Popup-body-line-item:has-text('{base_amt}')").first.click()
+        await page.wait_for_timeout(500)
+        
+        js_code = f"""
+        () => {{
+            let inputField = document.querySelector('input#van-field-1-input');
+            if(inputField) {{
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSetter.call(inputField, '{multiplier}');
+                inputField.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            }}
+        }}
+        """
+        await page.evaluate(js_code)
+        await page.wait_for_timeout(500)
+        await page.locator("div.Betting__Popup-foot-s").first.click()
+        return True
+    except Exception as e:
+        print(f"Place bet error: {e}")
+        return False
+
+
+async def check_if_won(page) -> bool:
+    try:
+        win_selectors = [
+            "div.WinningTip__C-body-l1:has-text('Congratulations')",
+            "div.WinningTip__C-body-l1:has-text('ဂုဏ်ယူပါတယ်')",
+        ]
+        for sel in win_selectors:
+            if await page.locator(sel).is_visible(timeout=3000):
+                await page.evaluate("document.body.click()")
+                return True
+        
+        lose_selectors = [
+            "div.WinningTip__C-body-l1:has-text('Try again')",
+            "div.WinningTip__C-body-l1:has-text('ထပ်ကြိုးစားပါ')",
+        ]
+        for sel in lose_selectors:
+            if await page.locator(sel).is_visible(timeout=3000):
+                await page.evaluate("document.body.click()")
+                return False
+        
+        return False
+    except:
+        return False
+
+
+async def run_real_betting_loop(message, status_msg, session_file, bet_sequence, profit_target, ai_mode):
+    global is_bot_running
+    
+    async with aiohttp.ClientSession() as api_session:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+            context = await browser.new_context(storage_state=session_file, viewport={'width': 390, 'height': 844}, is_mobile=True)
+            page = await context.new_page()
+            
+            try:
+                await status_msg.edit_text(f"{Emoji.HOURGLASS} Navigating to WINGO 30S...")
+                await page.goto(
+                    "https://www.777bigwingame.app/#/home/AllLotteryGames/WinGo?id=1",
+                    wait_until="networkidle"
+                )
+                await page.wait_for_timeout(4000)
+                
+                if "login" in page.url.lower():
+                    is_bot_running = False
+                    return await status_msg.edit_text(f"{Emoji.CROSS} Session expired. Please Login again.")
+                
+                await status_msg.edit_text(
+                    f"{Emoji.CHECK} <b>Real Auto-Bet Started!</b>\n"
+                    f"{Emoji.BRAIN} AI: {ai_mode} (16 modes)\n"
+                    f"{Emoji.MONEY_BAG} Sequence: {' -> '.join([str(b) for b in bet_sequence])}\n"
+                    f"{Emoji.TARGET} Target: {profit_target:,} Ks\n"
+                )
+                
+                current_step = 0
+                total_profit = 0
+                
+                while is_bot_running:
+                    # STEP 1: Get prediction from API
+                    history = await get_game_history(api_session)
+                    
+                    if history and len(history) >= 5:
+                        prediction = predict_next(history, ai_mode)
+                        latest = history[0]
+                        
+                        await message.answer(
+                            f"{Emoji.BAR_CHART} <b>API Data:</b>\n"
+                            f"Latest: {latest['issue_number']} = {latest['number']} ({latest['size']})\n"
+                            f"{Emoji.BRAIN} <b>AI ({ai_mode}): {prediction}</b>"
+                        )
+                    else:
+                        prediction = DEFAULT_PATTERN[current_step % len(DEFAULT_PATTERN)]
+                        await message.answer(
+                            f"{Emoji.WARNING} API failed, using fallback: <b>{prediction}</b>"
+                        )
+                    
+                    # STEP 2: Place bet via Playwright Browser
+                    current_amount = bet_sequence[current_step]
+                    display_type = "BIG" if prediction == "BIG" else "SMALL"
+                    step_text = f"(Step {current_step + 1}/{len(bet_sequence)})"
+                    
+                    if await place_bet_on_page(page, bet_type=prediction, amount=current_amount):
+                        await message.answer(
+                            f"{Emoji.ORDER} <b>Real Bet Placed!</b>\n"
+                            f"{Emoji.GAME_ICON} WINGO 30S: {display_type}\n"
+                            f"{Emoji.CHART_ICON} Amount: <b>{current_amount} Ks</b> {step_text}\n"
+                            f"{Emoji.BRAIN} AI ({ai_mode}): {prediction}\n"
+                            f"{Emoji.HOURGLASS} Waiting for result..."
+                        )
+                        
+                        await asyncio.sleep(35)
+                        await page.reload()
+                        await page.wait_for_timeout(3000)
+                        
+                        if await check_if_won(page):
+                            profit = current_amount * 0.96
+                            total_profit += profit
+                            
+                            await message.answer(
+                                f"{Emoji.WIN_CHECK} <b>WIN!</b> +{profit:.0f} Ks\n"
+                                f"{Emoji.MONEY_ICON} Session: +{total_profit:.0f} Ks\n"
+                                f"{Emoji.UP} Reset to {bet_sequence[0]} Ks"
+                            )
+                            current_step = 0
+                            
+                            if total_profit >= profit_target:
+                                await message.answer(
+                                    f"{Emoji.SPARKLES} <b>Target Reached!</b>\n"
+                                    f"{Emoji.MONEY_ICON} +{total_profit:.0f} Ks\n"
+                                    f"{Emoji.OFFLINE} Stopped."
+                                )
+                                is_bot_running = False
+                                break
+                        else:
+                            total_profit -= current_amount
+                            current_step += 1
+                            
+                            if current_step >= len(bet_sequence):
+                                await message.answer(
+                                    f"{Emoji.WARNING} <b>Sequence Lost!</b>\n"
+                                    f"{Emoji.LOSS_ICON} Session: {total_profit:.0f} Ks\n"
+                                    f"{Emoji.OFFLINE} Stopped."
+                                )
+                                is_bot_running = False
+                                break
+                            else:
+                                await message.answer(
+                                    f"{Emoji.LOSE_CROSS} <b>LOSE!</b> -{current_amount} Ks\n"
+                                    f"{Emoji.LOSS_ICON} Session: {total_profit:.0f} Ks\n"
+                                    f"{Emoji.DOWN} Next: <b>{bet_sequence[current_step]} Ks</b>"
+                                )
+                    else:
+                        await message.answer(f"{Emoji.WARNING} Failed to place bet. Retrying...")
+                    
+                    await asyncio.sleep(5)
+                    
+            except Exception as e:
+                await message.answer(f"{Emoji.WARNING} Error: {html.escape(str(e))}")
+            finally:
+                is_bot_running = False
+                await browser.close()
+                await api_session.close()
+                await message.answer(
+                    f"{Emoji.OFFLINE} <b>Real Auto-Bet Stopped.</b>\n"
+                    f"{Emoji.MONEY_ICON} Session P/L: {total_profit:.0f} Ks"
+                )
+
+
+@dp.message(F.text == "Stop")
+async def stop_autobet(message: types.Message):
+    global is_bot_running
+    is_bot_running = False
+    await message.answer(f"{Emoji.CHECK} <b>Stop signal sent.</b>")
+
+
+# ==========================================================
+# MAIN
+# ==========================================================
 async def main():
-    await init_system()
-    print("\n✨ WIN GO AI Bot v4.0 - 6 Step Bet Sequence + Auto Reset\n")
-    print(f"👑 Owner: {OWNER_ID}")
-    print(f"🧠 Default AI: {DEFAULT_AI_MODE}")
-    print(f"💲 Default Bet: 100→300→900→2700→8100→24300")
-    print(f"🛡️ Sudo Users: {len(SUDO_USERS)}\n")
-
-    dp.include_router(auth_router)
-    dp.include_router(owner_router)
-
+    if OWNER_ID and OWNER_ID != "0":
+        AUTHORIZED_USERS.add(int(OWNER_ID))
+    
+    print("=" * 60)
+    print("PSP AUTO BETTING V5")
+    print("=" * 60)
+    print("16 AI Modes + API Prediction + Browser Betting")
+    print("Virtual Mode: ENABLED")
+    print("Real Mode: ENABLED (Playwright)")
+    print(f"Owner: {OWNER_ID}")
+    print("=" * 60 + "\n")
+    
     await bot.delete_webhook(drop_pending_updates=True)
-    asyncio.create_task(auto_broadcaster())
     await dp.start_polling(bot)
 
 
@@ -1395,4 +1356,4 @@ if __name__ == '__main__':
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🔴 Bot Stopped")
+        print("\nBot Stopped")
