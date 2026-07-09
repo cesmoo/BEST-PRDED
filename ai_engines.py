@@ -13,63 +13,49 @@ class AIEmoji:
 
 # ========== 1. PATTERN AI (Improved) ==========
 def detect_active_pattern(history_list):
-    if len(history_list) < 4: return None, None, 0
-    patterns_to_check = [
-        ("BBSS→B", ["BIG", "BIG", "SMALL", "SMALL"], "BIG", 4),
-        ("BBS→B", ["BIG", "BIG", "SMALL"], "BIG", 3),
-        ("BSS→B", ["BIG", "SMALL", "SMALL"], "BIG", 3),
-        ("SSBB→S", ["SMALL", "SMALL", "BIG", "BIG"], "SMALL", 4),
-        ("SSB→S", ["SMALL", "SMALL", "BIG"], "SMALL", 3),
-        ("SBB→S", ["SMALL", "BIG", "BIG"], "SMALL", 3),
-        ("BSBS→B", ["BIG", "SMALL", "BIG", "SMALL"], "BIG", 4),
-        ("SBSB→S", ["SMALL", "BIG", "SMALL", "BIG"], "SMALL", 4),
-        ("BSB→B", ["BIG", "SMALL", "BIG"], "BIG", 3),
-        ("SBS→S", ["SMALL", "BIG", "SMALL"], "SMALL", 3),
-        ("BBB→B", ["BIG", "BIG", "BIG"], "BIG", 3),
-        ("SSS→S", ["SMALL", "SMALL", "SMALL"], "SMALL", 3),
-        ("BB→B", ["BIG", "BIG"], "BIG", 2),
-        ("SS→S", ["SMALL", "SMALL"], "SMALL", 2),
-        ("BBSB→B", ["BIG", "BIG", "SMALL", "BIG"], "BIG", 4),
-        ("SSBS→S", ["SMALL", "SMALL", "BIG", "SMALL"], "SMALL", 4),
-        ("BSBB→S", ["BIG", "SMALL", "BIG", "BIG"], "SMALL", 4),
-        ("SBSS→B", ["SMALL", "BIG", "SMALL", "SMALL"], "BIG", 4),
+    if len(history_list) < 4:
+        return None, None
+    patterns = [
+        ("BBSS", ["BIG", "BIG", "SMALL", "SMALL"]),
+        ("BBS", ["BIG", "BIG", "SMALL"]),
+        ("BSS", ["BIG", "SMALL", "SMALL"]),
+        ("BSBS", ["BIG", "SMALL", "BIG", "SMALL"]),
+        ("SBSB", ["SMALL", "BIG", "SMALL", "BIG"]),
+        ("BSB", ["BIG", "SMALL", "BIG"]),
+        ("SBS", ["SMALL", "BIG", "SMALL"]),
+        ("BBB", ["BIG", "BIG", "BIG"]),
+        ("SSS", ["SMALL", "SMALL", "SMALL"]),
     ]
-    recent = history_list[-20:]
-    best_pattern, best_next, best_score = None, None, 0
-    for pattern_name, pattern_seq, next_pred, weight in patterns_to_check:
-        pattern_len = len(pattern_seq)
-        if len(recent) < pattern_len: continue
-        match_count = 0; last_match_position = -1
-        for i in range(len(recent) - pattern_len + 1):
-            if recent[i:i+pattern_len] == pattern_seq:
-                match_count += 1; last_match_position = i
-        if match_count >= 2:
-            recency_bonus = 2 if last_match_position >= len(recent) - pattern_len - 5 else 0
-            score = (pattern_len * match_count * weight) + recency_bonus
+    recent = history_list[-15:]
+    best_pattern, best_score, best_next = None, 0, None
+    for name, seq in patterns:
+        plen = len(seq)
+        matches = sum(1 for i in range(len(recent) - plen + 1) if recent[i:i+plen] == seq)
+        if matches >= 2:
+            next_map = {"BBSS": "BIG", "BBS": "BIG", "BSS": "BIG", "BSBS": "BIG", "SBSB": "SMALL", "BSB": "BIG", "SBS": "SMALL", "BBB": "BIG", "SSS": "SMALL"}
+            nxt = next_map.get(name, "BIG")
+            score = matches * plen
             if score > best_score:
-                best_score, best_pattern, best_next = score, pattern_name, next_pred
-    return best_pattern, best_next, best_score
+                best_score, best_pattern, best_next = score, name, nxt
+    return best_pattern, best_next
 
 def pattern_predict(history_docs):
-    if len(history_docs) < 10: return "BIG", "BIG (အကြီး) 🔴", 55.0, f"{AIEmoji.HOURGLASS} Pattern: Data စုဆောင်းဆဲ..."
+    if len(history_docs) < 10:
+        return "BIG", "BIG (အကြီး) 🔴", 55.0, f"{Emoji.HOURGLASS} Pattern: Data စုဆောင်းဆဲ..."
     docs = list(reversed(history_docs))
     all_history = [d.get('size', 'BIG') for d in docs]
-    active_pattern, next_pred, score = detect_active_pattern(all_history)
-    if active_pattern and next_pred:
-        prob = min(65 + (score * 2), 85)
-        if next_pred == "BIG": return "BIG", f"BIG (အကြီး) 🔴", prob, f"{AIEmoji.PATTERN} Pattern: {active_pattern} → BIG"
-        else: return "SMALL", f"SMALL (အသေး) 🟢", prob, f"{AIEmoji.PATTERN} Pattern: {active_pattern} → SMALL"
-    recent_5 = all_history[-5:]
-    big_in_5 = recent_5.count("BIG"); small_in_5 = recent_5.count("SMALL")
-    if len(all_history) >= 4:
-        last_4 = all_history[-4:]
-        if last_4 == ["BIG", "SMALL", "BIG", "SMALL"]: return "BIG", "BIG (အကြီး) 🔴", 65.0, f"{AIEmoji.PATTERN} Pattern: BSBS → BIG"
-        elif last_4 == ["SMALL", "BIG", "SMALL", "BIG"]: return "SMALL", "SMALL (အသေး) 🟢", 65.0, f"{AIEmoji.PATTERN} Pattern: SBSB → SMALL"
-    if big_in_5 >= 3: return "BIG", "BIG (အကြီး) 🔴", 60.0, f"📊 Recent trend: BIG ({big_in_5}/5)"
-    elif small_in_5 >= 3: return "SMALL", "SMALL (အသေး) 🟢", 60.0, f"📊 Recent trend: SMALL ({small_in_5}/5)"
-    b_count = all_history.count("BIG"); s_count = all_history.count("SMALL")
-    if b_count > s_count: return "BIG", "BIG (အကြီး) 🔴", 55.0, f"📊 Majority: BIG ({b_count}:{s_count})"
-    else: return "SMALL", "SMALL (အသေး) 🟢", 55.0, f"📊 Majority: SMALL ({b_count}:{s_count})"
+    active_pattern, next_pred = detect_active_pattern(all_history)
+    if active_pattern:
+        if next_pred == "BIG":
+            return "BIG", "BIG (အကြီး) 🔴", 75.0, f"{Emoji.PATTERN} Pattern: {active_pattern} {Emoji.UP} BIG"
+        else:
+            return "SMALL", "SMALL (အသေး) 🟢", 75.0, f"{Emoji.PATTERN} Pattern: {active_pattern} {Emoji.DOWN} SMALL"
+    else:
+        b = all_history.count("BIG"); s = all_history.count("SMALL")
+        if b > s:
+            return "BIG", "BIG (အကြီး) 🔴", 55.0, f"{Emoji.INFO} Majority BIG ({b}:{s})"
+        else:
+            return "SMALL", "SMALL (အသေး) 🟢", 55.0, f"{Emoji.INFO} Majority SMALL ({b}:{s})"
 
 # ========== 2. MARTINGALE AI ==========
 def martingale_predict(history_docs):
