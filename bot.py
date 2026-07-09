@@ -1,6 +1,4 @@
-## 📁 `PSP-AUTO-BETTING-V5.py` (အပြည့်အစုံ)
-
-```python
+## 📁 `PSP-AUTO-BETTING-V5.py` 
 # PSP-AUTO-BETTING-V5.py
 """
 PSP AUTO BETTING V5
