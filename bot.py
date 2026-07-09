@@ -1,6 +1,3 @@
-
----
-
 ## 📁 `PSP-AUTO-BETTING-V5.py` (အပြည့်အစုံ)
 
 ```python
