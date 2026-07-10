@@ -1,4 +1,4 @@
-# bot.py (API + Playwright + AI + Real/Virtual Mode)
+# bot.py (API + Playwright + AI + Real/Virtual Mode - Fixed Keyboard & Custom Bet)
 import asyncio
 import os
 import html
@@ -63,18 +63,15 @@ class LoginForm(StatesGroup):
     choose_mode = State()
 
 # ==========================================================
-# ⌨️ Keyboards
+# ⌨️ Keyboards (2 Columns - ဘေးချင်းကပ်)
 # ==========================================================
 def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🔐 Login")],
-            [KeyboardButton(text="🎰 Games")],
-            [KeyboardButton(text="⚙️ Mode")],
-            [KeyboardButton(text="📊 Status")],
-            [KeyboardButton(text="🧠 AI Mode")],
-            [KeyboardButton(text="💲 Bet Size")],
-            [KeyboardButton(text="🎯 Target")]
+            [KeyboardButton(text="🔐 Login"), KeyboardButton(text="⚙️ Mode")],
+            [KeyboardButton(text="📊 Status"), KeyboardButton(text="🧠 AI Mode")],
+            [KeyboardButton(text="💲 Bet Size"), KeyboardButton(text="🎯 Target")],
+            [KeyboardButton(text="🎰 Games")]
         ],
         resize_keyboard=True
     )
@@ -82,15 +79,11 @@ def get_main_keyboard():
 def get_logged_in_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📋 Info")],
-            [KeyboardButton(text="🎰 Games")],
-            [KeyboardButton(text="▶️ Start Auto-Bet")],
-            [KeyboardButton(text="⏹️ Stop Auto-Bet")],
-            [KeyboardButton(text="🔐 Logout")],
-            [KeyboardButton(text="📊 Status")],
-            [KeyboardButton(text="🧠 AI Mode")],
-            [KeyboardButton(text="💲 Bet Size")],
-            [KeyboardButton(text="🎯 Target")]
+            [KeyboardButton(text="📋 Info"), KeyboardButton(text="🎰 Games")],
+            [KeyboardButton(text="▶️ Start Auto-Bet"), KeyboardButton(text="⏹️ Stop Auto-Bet")],
+            [KeyboardButton(text="📊 Status"), KeyboardButton(text="🧠 AI Mode")],
+            [KeyboardButton(text="💲 Bet Size"), KeyboardButton(text="🎯 Target")],
+            [KeyboardButton(text="🔐 Logout")]
         ],
         resize_keyboard=True
     )
@@ -98,8 +91,7 @@ def get_logged_in_keyboard():
 def get_mode_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🟢 Real Mode")],
-            [KeyboardButton(text="🟡 Virtual Mode")],
+            [KeyboardButton(text="🟢 Real Mode"), KeyboardButton(text="🟡 Virtual Mode")],
             [KeyboardButton(text="🔙 နောက်သို့")]
         ],
         resize_keyboard=True
@@ -135,6 +127,10 @@ def get_betsize_inline_keyboard(current_seq: list) -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(
         text="💰 50-150-450-1350-4050-12150 (Small 6 Steps)",
         callback_data="setbetsize_50_150_450_1350_4050_12150"
+    ))
+    builder.row(InlineKeyboardButton(
+        text="💰 200-600-1800-5400-16200-48600 (Medium 6 Steps)",
+        callback_data="setbetsize_200_600_1800_5400_16200_48600"
     ))
     builder.row(InlineKeyboardButton(
         text="✏️ Custom Bet Size",
@@ -514,11 +510,9 @@ async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None, s
                 if is_win:
                     profit = bet_amount * 0.96
                     lose_streak = 0
-                    result_text = f"WIN! +{profit:,.2f} Ks"
                 else:
                     profit = -bet_amount
                     lose_streak += 1
-                    result_text = f"LOSE! -{bet_amount:,.2f} Ks"
 
                 total_profit += profit
                 balance = float(data.get("balance", "0").replace(",", ""))
@@ -530,32 +524,33 @@ async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None, s
                         profit = bet_amount * 0.96
                         virtual_balances[user_id] += bet_amount + profit
                         lose_streak = 0
-                        result_text = f"WIN! +{profit:,.2f} Ks"
                     else:
                         profit = -bet_amount
                         lose_streak += 1
-                        result_text = f"LOSE! -{bet_amount:,.2f} Ks"
                     total_profit += profit
                     balance = virtual_balances[user_id]
-                    result_data = {"period": f"Virtual-{datetime.now().strftime('%H%M%S')}", "number": "N/A", "size": predicted_size, "color_emoji": "⚪"}
+                    result_data = {"period": f"{datetime.now().strftime('%Y%m%d%H%M%S')}", "number": "N/A", "size": predicted_size, "color_emoji": "⚪"}
                 else:
                     await bot.send_message(user_id, "⚠️ Balance မလုံလောက်ပါ။")
                     await state.update_data(auto_bet_running=False)
                     break
 
-            # 6. Send Notification (AI Prediction included)
+            # 6. Send Notification (ခင်ဗျားလိုချင်တဲ့ပုံစံအတိုင်း)
             period_display = result_data.get("period", "N/A")
+            win_emoji = "✅" if is_win else "❌"
+            win_lose_text = f"{win_emoji} WIN! +{profit:,.2f} Ks" if is_win else f"{win_emoji} LOSE! -{bet_amount:,.2f} Ks"
+
             await bot.send_message(
                 user_id,
-                f"⚡ WINGO_30S : {period_display}\n"
-                f"⚡ {predicted_size.upper()} | {bet_amount:,.0f} Ks | 📉 Streak: {lose_streak}/{len(bet_sequence)}\n"
-                f"🎯 {ai_name} | AI: {display} ({prob:.0f}%)\n\n"
-                f"{result_text}\n"
-                f"─────────────────────\n"
-                f"⚡ WINGO_30S : {period_display}\n"
-                f"⚡ Result: {result_data.get('number', 'N/A')} {result_data.get('color_emoji', '⚪')} {result_data.get('size', 'N/A')}\n"
-                f"⚡ Balance: {balance:,.2f} Ks\n"
-                f"⚡ Profit: {total_profit:,.2f} Ks"
+                f"🎮 WINGO_30S: {period_display}\n"
+                f"📊 {predicted_size.upper()} | {bet_amount:,.0f} Ks\n"
+                f"🧠 {ai_name}\n\n"
+                f"{win_lose_text}\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🎮 WINGO_30S : {period_display}\n"
+                f"📊 Result: {result_data.get('number', 'N/A')} {result_data.get('color_emoji', '⚪')} {result_data.get('size', 'N/A')}\n"
+                f"💰 Balance: {balance:,.2f} Ks\n"
+                f"📈 Profit: {total_profit:,.2f} Ks"
             )
 
             # 7. Wait for next period
@@ -662,28 +657,108 @@ async def cb_user_mode_select(callback: types.CallbackQuery, state: FSMContext):
 async def handle_betsize(message: types.Message, state: FSMContext):
     data = await state.get_data()
     current_seq = data.get("bet_sequence", DEFAULT_BET_SEQUENCE)
-    await message.answer("💲 Bet Size သတ်မှတ်ရန်", reply_markup=get_betsize_inline_keyboard(current_seq))
+    current_str = " → ".join([f"{b:,}" for b in current_seq])
+    await message.answer(
+        f"💲 <b>Bet Size သတ်မှတ်ရန်</b>\n\n"
+        f"📌 လက်ရှိ: {current_str} ({len(current_seq)} ဆင့်)\n\n"
+        f"👇 Preset ရွေးပါ သို့မဟုတ် Custom ထည့်ပါ:",
+        reply_markup=get_betsize_inline_keyboard(current_seq)
+    )
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("setbetsize_"))
 async def cb_set_betsize(callback: types.CallbackQuery, state: FSMContext):
     parts = callback.data.replace("setbetsize_", "").split("_")
     bet_seq = [int(x) for x in parts]
     await state.update_data(bet_sequence=bet_seq)
-    await callback.message.edit_text(f"✅ Bet Size Updated: {' → '.join([f'{b:,}' for b in bet_seq])}")
+    bet_str = " → ".join([f"{b:,}" for b in bet_seq])
+    await callback.message.edit_text(
+        f"✅ <b>Bet Size သတ်မှတ်ပြီး!</b>\n\n"
+        f"💲 Sequence ({len(bet_seq)} ဆင့်): {bet_str}",
+        reply_markup=get_betsize_inline_keyboard(bet_seq)
+    )
     await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "betsize_custom")
+async def cb_betsize_custom(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user_betsize_input[user_id] = True
+    await callback.message.edit_text(
+        f"✏️ <b>Custom Bet Size သတ်မှတ်ရန်</b>\n\n"
+        f"👇 <b>အောက်ပါပုံစံအတိုင်း စာရိုက်ထည့်ပါ:</b>\n"
+        f"<code>100-300-900-2700-8100-24300</code>\n\n"
+        f"Cancel: <code>/cancel</code>"
+    )
+    await callback.answer()
+
+@dp.message(lambda m: m.text and '-' in m.text and m.from_user.id in user_betsize_input)
+async def handle_betsize_input(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    try:
+        parts = message.text.strip().split('-')
+        bet_seq = [float(p.strip().replace(',', '')) for p in parts if p.strip()]
+        await state.update_data(bet_sequence=bet_seq)
+        del user_betsize_input[user_id]
+        bet_str = " → ".join([f"{b:,.0f}" for b in bet_seq])
+        await message.reply(
+            f"✅ <b>Custom Bet Size သတ်မှတ်ပြီး!</b>\n"
+            f"💲 Sequence: {bet_str}",
+            reply_markup=get_logged_in_keyboard() if user_id in active_sessions else get_main_keyboard()
+        )
+    except:
+        await message.reply("❌ ပုံစံမှားနေပါသည်။ ဥပမာ: 100-300-900")
 
 @dp.message(F.text == "🎯 Target")
 async def handle_target(message: types.Message, state: FSMContext):
     data = await state.get_data()
     current_target = data.get("profit_target", 30000.0)
-    await message.answer(f"🎯 Target: {current_target:,.0f} Ks", reply_markup=get_target_inline_keyboard())
+    await message.answer(
+        f"🎯 <b>Profit Target သတ်မှတ်ရန်</b>\n\n"
+        f"📌 လက်ရှိ: {current_target:,.0f} Ks\n\n"
+        f"👇 ပမာဏရွေးပါ သို့မဟုတ် Custom ထည့်ပါ:",
+        reply_markup=get_target_inline_keyboard()
+    )
 
 @dp.callback_query(lambda c: c.data and c.data.startswith("settarget_"))
 async def cb_set_target(callback: types.CallbackQuery, state: FSMContext):
     target = float(callback.data.replace("settarget_", ""))
     await state.update_data(profit_target=target)
-    await callback.message.edit_text(f"✅ Target: {target:,.0f} Ks")
+    await callback.message.edit_text(f"✅ <b>Profit Target သတ်မှတ်ပြီး!</b>\n🎯 Target: {target:,.0f} Ks")
     await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "target_custom")
+async def cb_target_custom(callback: types.CallbackQuery, state: FSMContext):
+    user_id = callback.from_user.id
+    user_target_input[user_id] = True
+    await callback.message.edit_text(
+        f"✏️ <b>Custom Profit Target ထည့်ရန်</b>\n\n"
+        f"👇 ဂဏန်းထည့်ပါ (ဥပမာ: <code>50000</code>):\n"
+        f"Cancel: <code>/cancel</code>"
+    )
+    await callback.answer()
+
+@dp.message(lambda m: m.text and m.text.strip().isdigit() and m.from_user.id in user_target_input)
+async def handle_target_input(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    try:
+        target = float(message.text.strip())
+        await state.update_data(profit_target=target)
+        del user_target_input[user_id]
+        active_users = await db.get_active_users()
+        await message.reply(
+            f"✅ <b>Profit Target သတ်မှတ်ပြီး!</b>\n🎯 Target: {target:,.0f} Ks",
+            reply_markup=get_logged_in_keyboard() if user_id in active_users else get_main_keyboard()
+        )
+    except:
+        await message.reply("❌ ဂဏန်းသာထည့်ပါ။")
+
+@dp.message(Command("cancel"))
+async def cmd_cancel(message: types.Message):
+    user_id = message.from_user.id
+    if user_id in user_target_input:
+        del user_target_input[user_id]
+    if user_id in user_betsize_input:
+        del user_betsize_input[user_id]
+    await message.reply("✅ Cancelled.")
 
 @dp.message(LoginForm.main_menu, F.text == "🔐 Logout")
 async def logout(message: types.Message, state: FSMContext):
