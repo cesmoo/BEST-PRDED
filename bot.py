@@ -1,10 +1,12 @@
-# bot.py (Real/Virtual Mode - AI Prediction + Auto-Bet + Full Features)
+# bot.py (API + Playwright + AI + Real/Virtual Mode)
 import asyncio
 import os
 import html
 import random
+import time
 from datetime import datetime
 from dotenv import load_dotenv
+import aiohttp
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -22,18 +24,33 @@ from ai_engines import get_prediction, AI_MODES
 from database import db
 
 load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+USERNAME = os.getenv("BIGWIN_USERNAME")
+PASSWORD = os.getenv("BIGWIN_PASSWORD")
+
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 # Global variables
-active_sessions = {}       # Real Mode: Playwright sessions
-virtual_balances = {}      # Virtual Mode: in-memory balance
+active_sessions = {}
+virtual_balances = {}
 user_target_input = {}
 user_betsize_input = {}
 DEFAULT_BET_SEQUENCE = [100, 300, 900, 2700, 8100, 24300]
 DEFAULT_AI_MODE = "ensemble"
+CURRENT_TOKEN = ""
+LAST_PROCESSED_ISSUE = None
+
+BASE_HEADERS = {
+    'authority': 'api.bigwinqaz.com',
+    'accept': 'application/json, text/plain, */*',
+    'content-type': 'application/json;charset=UTF-8',
+    'origin': 'https://www.777bigwingame.app/',
+    'referer': 'https://www.777bigwingame.app/',
+    'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
+}
 
 # ==========================================================
 # 🗂️ FSM States
@@ -192,7 +209,211 @@ async def login_start(message: types.Message, state: FSMContext):
     await state.set_state(LoginForm.select_site)
     await message.answer("🌐 <b>Please select a site to login:</b>", reply_markup=get_site_keyboard())
 
-# ... (Login/Playwright အပိုင်းကို မူရင်းအတိုင်းထားပါ၊ အောက်မှာ auto-bet ကို ပြင်ပါမယ်)
+@dp.message(LoginForm.select_site)
+async def process_site(message: types.Message, state: FSMContext):
+    if message.text == "🔙 နောက်သို့":
+        await state.clear()
+        return await message.answer("Cancelled.", reply_markup=get_main_keyboard())
+    await state.update_data(site=message.text)
+    await state.set_state(LoginForm.enter_phone)
+    await message.answer("📞 <b>Please enter your phone:</b>", reply_markup=ReplyKeyboardRemove())
+
+@dp.message(LoginForm.enter_phone)
+async def process_phone(message: types.Message, state: FSMContext):
+    await state.update_data(phone=message.text)
+    await state.set_state(LoginForm.enter_password)
+    await message.answer("🔑 <b>Please enter your password:</b>", reply_markup=ReplyKeyboardRemove())
+
+@dp.message(LoginForm.enter_password)
+async def process_password(message: types.Message, state: FSMContext):
+    password = message.text
+    data = await state.get_data()
+    username = data.get('phone')
+    user_tg_id = message.from_user.id
+    
+    loading_msg = await message.answer("🔄 <b>အကောင့်ဝင်နေပါသည်... ခဏစောင့်ပါ...</b>")
+    
+    p = await async_playwright().start()
+    browser = await p.chromium.launch(headless=True, args=['--no-sandbox', '--disable-setuid-sandbox'])
+    context = await browser.new_context(
+        user_agent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36", 
+        viewport={'width': 390, 'height': 844}, 
+        is_mobile=True
+    )
+    page = await context.new_page()
+    
+    try:
+        await page.goto("https://www.777bigwingame.app/#/login", wait_until="networkidle", timeout=60000)
+        await page.wait_for_timeout(3000)
+
+        js_code = """
+        ([user, pwd]) => {
+            function fillVueInput(element, value) {
+                if (!element) return false;
+                const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                nativeSetter.call(element, value);
+                element.dispatchEvent(new Event('input', { bubbles: true }));
+                element.dispatchEvent(new Event('change', { bubbles: true }));
+                element.blur();
+                return true;
+            }
+            let phone = document.querySelector('input[name="userNumber"]');
+            fillVueInput(phone, user);
+            let pass = document.querySelector('input[placeholder="စကားဝှက်"]') || 
+                       document.querySelector('input[placeholder="Password"]') || 
+                       document.querySelector('.passwordInput__container-input input');
+            fillVueInput(pass, pwd);
+        }
+        """
+        await page.evaluate(js_code, [username, password])
+        await page.wait_for_timeout(1000)
+
+        await page.evaluate("""
+            () => {
+                let btn = document.querySelector('button.active');
+                if (btn) btn.click();
+            }
+        """)
+        
+        await page.wait_for_timeout(5000)
+        
+        try:
+            close_selector = ".announcement-dialog__button"
+            for _ in range(3):
+                btn = await page.query_selector(close_selector)
+                if btn:
+                    await btn.click()
+                    await page.wait_for_timeout(1000)
+                else:
+                    break
+        except:
+            pass
+        
+        if "login" not in page.url.lower():
+            try:
+                await page.goto("https://www.777bigwingame.app/#/main", wait_until="networkidle")
+                await page.wait_for_timeout(3000)
+            except Exception as e:
+                print(f"Info Page Error: {e}")
+
+            user_id, nickname, balance_text = "N/A", "Unknown", "0.00 Ks"
+            site_login_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            try:
+                nick_el = page.locator('.userInfo__container-content-nickname h3').first
+                if await nick_el.is_visible(timeout=3000):
+                    nickname = await nick_el.inner_text()
+                uid_el = page.locator('.userInfo__container-content-uid span:nth-child(3)').first
+                if await uid_el.is_visible(timeout=2000):
+                    user_id = await uid_el.inner_text()
+                balance_el = page.locator('.balance_info p.totalSavings__container-header__subtitle span').first
+                if await balance_el.is_visible(timeout=2000):
+                    balance_text = await balance_el.inner_text()
+            except Exception as e:
+                print(f"Scraping Error: {e}")
+
+            await page.goto("https://www.777bigwingame.app/#/home/AllLotteryGames/WinGo?id=1", wait_until="networkidle")
+            await page.wait_for_timeout(2000)
+
+            await state.update_data(
+                is_logged_in=True, username=username, user_id=user_id.strip(),
+                nickname=nickname.strip(), balance=balance_text.strip(), login_time=site_login_time.strip()
+            )
+
+            active_sessions[user_tg_id] = {
+                "playwright": p,
+                "browser": browser,
+                "page": page
+            }
+
+            await message.answer(
+                "✅ <b>LOGIN SUCCESSFUL</b>\n\n"
+                "သင့်အကောင့်အချက်အလက်များကို ကြည့်ရှုရန် အောက်ပါ <b>📋 Info</b> ခလုတ်ကို နှိပ်ပါ။",
+                reply_markup=get_logged_in_keyboard()
+            )
+            await state.set_state(LoginForm.main_menu)
+        else:
+            await message.answer("❌ <b>Login မအောင်မြင်ပါ။</b>", reply_markup=get_main_keyboard())
+            await browser.close()
+            await p.stop()
+            await state.clear()
+
+        await loading_msg.delete()
+
+    except Exception as e:
+        await message.answer(f"⚠️ <b>Error:</b> {html.escape(str(e))}", reply_markup=get_main_keyboard())
+        await browser.close()
+        await p.stop()
+        await state.clear()
+        await loading_msg.delete()
+
+# ==========================================================
+# 🔥 API Functions (History Data အတွက်)
+# ==========================================================
+async def fetch_with_retry(session, url, headers, json_data, retries=1):
+    for _ in range(retries):
+        try:
+            async with session.post(url, headers=headers, json=json_data, timeout=3.0) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+        except Exception:
+            await asyncio.sleep(0.2)
+    return None
+
+async def login_and_get_token(session: aiohttp.ClientSession):
+    global CURRENT_TOKEN
+    json_data = {
+        'username': USERNAME, 'pwd': PASSWORD, 'phonetype': 1, 'logintype': 'mobile',
+        'packId': '', 'deviceId': '51ed4ee0f338a1bb24063ffdfcd31ce6', 'language': 7,
+        'random': '4fc4413428be43faa1a3f30d9745ae3a',
+        'signature': '5458639AF428AC897FDFF1102D82EB9C',
+        'timestamp': int(time.time()),
+    }
+    data = await fetch_with_retry(
+        session, 'https://api.bigwinqaz.com/api/webapi/Login', BASE_HEADERS, json_data
+    )
+    if data and data.get('code') == 0:
+        token_str = data.get('data', {})
+        CURRENT_TOKEN = f"Bearer {token_str}" if isinstance(token_str, str) else f"Bearer {token_str.get('token', '')}"
+        print("✅ Login Success\n")
+        return True
+    return False
+
+async def check_game_and_predict(session: aiohttp.ClientSession):
+    global CURRENT_TOKEN, LAST_PROCESSED_ISSUE
+
+    if not CURRENT_TOKEN:
+        if not await login_and_get_token(session):
+            return False
+
+    headers = BASE_HEADERS.copy()
+    headers['authorization'] = CURRENT_TOKEN
+
+    json_data = {
+        'pageSize': 10, 'pageNo': 1, 'typeId': 30, 'language': 7,
+        'random': '9ef85244056948ba8dcae7aee7758bf4',
+        'signature': '2EDB8C2B5264F62EC53116916A9EC05C',
+        'timestamp': int(time.time()),
+    }
+
+    data = await fetch_with_retry(
+        session, 'https://api.bigwinqaz.com/api/webapi/GetNoaverageEmerdList', headers, json_data
+    )
+
+    if data and data.get('code') == 0:
+        records = data.get("data", {}).get("list", [])
+        if records:
+            latest_record = records[0]
+            latest_issue = str(latest_record["issueNumber"])
+            latest_number = int(latest_record["number"])
+            latest_size = "BIG" if latest_number >= 5 else "SMALL"
+
+            if not LAST_PROCESSED_ISSUE or int(latest_issue) > int(LAST_PROCESSED_ISSUE):
+                LAST_PROCESSED_ISSUE = latest_issue
+                await db.add_history(latest_issue, latest_number, latest_size)
+                print(f"✅ History updated: {latest_issue} - {latest_number} ({latest_size})")
+                return True
+    return False
 
 # ==========================================================
 # 🎯 AI Prediction + Auto-Bet Logic (Real & Virtual)
@@ -236,7 +457,7 @@ async def get_real_result(page):
     except:
         return None
 
-async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None):
+async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None, session=None):
     lose_streak = 0
     total_profit = 0.0
     balance = 0.0
@@ -247,7 +468,11 @@ async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None):
             if not data.get("auto_bet_running"):
                 break
 
-            # Load user settings
+            # 1. Update History from API (Real Mode only)
+            if mode == "real" and session:
+                await check_game_and_predict(session)
+
+            # 2. Load user settings
             ai_mode = data.get("ai_mode", DEFAULT_AI_MODE)
             bet_sequence = data.get("bet_sequence", DEFAULT_BET_SEQUENCE)
             profit_target = data.get("profit_target", 30000.0)
@@ -258,7 +483,7 @@ async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None):
                 await bot.send_message(user_id, f"🎯 Target Reached! Total Profit: {total_profit:,.2f} Ks")
                 break
 
-            # Get AI prediction
+            # 3. Get AI prediction from DB history
             history_docs = await db.get_history(50)
             if not history_docs:
                 await asyncio.sleep(5)
@@ -267,14 +492,13 @@ async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None):
             predicted_size, prob, display, reason = await get_ai_prediction(history_docs, ai_mode)
             ai_name = AI_MODES.get(ai_mode, {}).get("name", "AI")
 
-            # Bet amount from sequence
+            # 4. Bet amount from sequence
             if lose_streak >= len(bet_sequence):
                 lose_streak = 0
             bet_amount = bet_sequence[lose_streak]
 
-            # ========== EXECUTE BET based on MODE ==========
+            # 5. Execute Bet (Real = Playwright, Virtual = Simulation)
             if mode == "real" and page:
-                # Real Mode: Playwright
                 success = await place_auto_bet(page, predicted_size, bet_amount)
                 if not success:
                     await bot.send_message(user_id, "⚠️ Bet placement failed!")
@@ -300,7 +524,6 @@ async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None):
                 balance = float(data.get("balance", "0").replace(",", ""))
 
             elif mode == "virtual":
-                # Virtual Mode: In-memory
                 if virtual_balances.get(user_id, 0) >= bet_amount:
                     virtual_balances[user_id] -= bet_amount
                     if random.random() < 0.5:
@@ -316,11 +539,11 @@ async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None):
                     balance = virtual_balances[user_id]
                     result_data = {"period": f"Virtual-{datetime.now().strftime('%H%M%S')}", "number": "N/A", "size": predicted_size, "color_emoji": "⚪"}
                 else:
-                    await bot.send_message(user_id, "⚠️ Virtual Balance မလုံလောက်ပါ။")
+                    await bot.send_message(user_id, "⚠️ Balance မလုံလောက်ပါ။")
                     await state.update_data(auto_bet_running=False)
                     break
 
-            # ========== SEND NOTIFICATION (Same format for both modes) ==========
+            # 6. Send Notification (AI Prediction included)
             period_display = result_data.get("period", "N/A")
             await bot.send_message(
                 user_id,
@@ -335,7 +558,7 @@ async def auto_bet_loop(user_id: int, state: FSMContext, mode: str, page=None):
                 f"⚡ Profit: {total_profit:,.2f} Ks"
             )
 
-            # Wait for next period
+            # 7. Wait for next period
             await asyncio.sleep(30 - (datetime.now().second % 30))
 
         except Exception as e:
@@ -368,7 +591,8 @@ async def start_auto_bet(message: types.Message, state: FSMContext):
 
     asyncio.create_task(auto_bet_loop(
         user_id, state, mode,
-        active_sessions.get(user_id, {}).get("page") if mode == "real" else None
+        active_sessions.get(user_id, {}).get("page") if mode == "real" else None,
+        None  # session ကို main ကနေ ရယူမယ်
     ))
 
 @dp.message(F.text == "⏹️ Stop Auto-Bet")
@@ -487,9 +711,13 @@ async def cb_back(callback: types.CallbackQuery):
 # 🚀 Main
 # ==========================================================
 async def main():
-    print("🚀 Auto-Bot (Real/Virtual + AI) Started...")
+    print("🚀 Auto-Bot (API + Playwright + AI) Started...")
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+
+    # Real Mode အတွက် API Session ကို ကြိုတင်ပြင်ဆင်ထားမယ်
+    async with aiohttp.ClientSession() as session:
+        await login_and_get_token(session)
+        await dp.start_polling(bot)
 
 if __name__ == '__main__':
     try:
