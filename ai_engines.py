@@ -11,8 +11,6 @@ class AIEmoji:
     CHART_UP = "📈"; CHART_DOWN = "📉"; STAR = "⭐"
     ROBOT = "🤖"; BRAIN = "🧠"
 
-# ai_engines.py
-
 # ==========================================
 # 1. PATTERN AI (9 Patterns Only)
 # ==========================================
@@ -53,7 +51,6 @@ def detect_active_pattern(history_list):
                 best_score, best_pattern, best_next = score, name, nxt
     
     return best_pattern, best_next
-
 
 def pattern_predict(history_docs):
     if len(history_docs) < 10:
