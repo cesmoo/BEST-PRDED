@@ -1,4 +1,4 @@
-# bot.py (မူရင်းအတိုင်း + Real/Virtual Mode + Playwright Auto-Bet)
+# bot.py (မူရင်း Login Flow + Real/Virtual Mode + Playwright Auto-Bet)
 import asyncio
 import time
 import os
@@ -226,19 +226,25 @@ def get_main_reply_keyboard(is_active: bool = False, mode: str = "virtual") -> R
         builder.row(KeyboardButton(text="▶️ Start Auto-Bet"))
 
     # Mode Selection
-    mode_btn = "🔵 Real Mode" if mode == "real" else "🟡 Virtual Mode"
-    builder.row(KeyboardButton(text=mode_btn), KeyboardButton(text="🧠 AI Mode"))
-
+    if mode == "real":
+        mode_btn = "🟢 Real Mode"
+    else:
+        mode_btn = "🟡 Virtual Mode"
+    
+    builder.row(
+        KeyboardButton(text=mode_btn),
+        KeyboardButton(text="🧠 AI Mode")
+    )
     builder.row(
         KeyboardButton(text="💰 Balance"),
-        KeyboardButton(text="📊 Status"),
+        KeyboardButton(text="📊 Status")
     )
     builder.row(
         KeyboardButton(text="⚙️ Settings"),
-        KeyboardButton(text="📋 My Bets"),
+        KeyboardButton(text="📋 My Bets")
     )
     builder.row(
-        KeyboardButton(text="👑 Top 10"),
+        KeyboardButton(text="👑 Top 10")
     )
 
     return builder.as_markup(resize_keyboard=True)
@@ -393,7 +399,7 @@ async def login_and_get_token(session: aiohttp.ClientSession):
 
 
 # ==========================================
-# 7. PLAYWRIGHT LOGIN (Real Mode)
+# 7. PLAYWRIGHT LOGIN (Real Mode - Phone & Password ဖြင့် Login)
 # ==========================================
 async def playwright_login(user_id: int, username: str, password: str):
     """Playwright ဖြင့် BigWin သို့ Login ဝင်ပြီး Page ကို သိမ်းဆည်းခြင်း"""
@@ -825,11 +831,80 @@ async def auto_broadcaster():
 
 
 # ==========================================
-# 13. COMMAND HANDLERS
+# 13. FSM STATES FOR LOGIN
+# ==========================================
+class LoginForm(StatesGroup):
+    select_site = State()
+    enter_phone = State()
+    enter_password = State()
+
+# ==========================================
+# 14. LOGIN COMMAND HANDLERS (မူရင်းအတိုင်း)
+# ==========================================
+@auth_router.message(lambda m: m.text and m.text.strip() == "🔐 Login")
+async def login_start(message: types.Message, state: FSMContext):
+    await state.set_state(LoginForm.select_site)
+    await message.answer("🌐 <b>Please select a site to login:</b>", reply_markup=get_site_keyboard())
+
+def get_site_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="777BIGWIN")],
+            [KeyboardButton(text="🔙 နောက်သို့")]
+        ],
+        resize_keyboard=True
+    )
+
+@auth_router.message(LoginForm.select_site)
+async def process_site(message: types.Message, state: FSMContext):
+    if message.text == "🔙 နောက်သို့":
+        await state.clear()
+        return await message.answer("Cancelled.", reply_markup=get_main_reply_keyboard())
+    await state.update_data(site=message.text)
+    await state.set_state(LoginForm.enter_phone)
+    await message.answer("📞 <b>Please enter your phone:</b>", reply_markup=ReplyKeyboardRemove())
+
+@auth_router.message(LoginForm.enter_phone)
+async def process_phone(message: types.Message, state: FSMContext):
+    await state.update_data(phone=message.text)
+    await state.set_state(LoginForm.enter_password)
+    await message.answer("🔑 <b>Please enter your password:</b>", reply_markup=ReplyKeyboardRemove())
+
+@auth_router.message(LoginForm.enter_password)
+async def process_password(message: types.Message, state: FSMContext):
+    password = message.text
+    data = await state.get_data()
+    phone = data.get('phone')
+    user_id = message.from_user.id
+
+    loading_msg = await message.answer("🔄 <b>အကောင့်ဝင်နေပါသည်... ခဏစောင့်ပါ...</b>")
+
+    # Playwright Login
+    success = await playwright_login(user_id, phone, password)
+    await loading_msg.delete()
+
+    if success:
+        await message.answer(
+            "✅ <b>Login Successful!</b>\n\n"
+            "Real Mode အတွက် အဆင်သင့်ဖြစ်ပါပြီ။\n"
+            "Auto-Bet စတင်ရန် <b>▶️ Start Auto-Bet</b> ကိုနှိပ်ပါ။",
+            reply_markup=get_main_reply_keyboard(False, "real")
+        )
+    else:
+        await message.answer(
+            "❌ <b>Login Failed!</b>\n"
+            "ကျေးဇူးပြု၍ phone/password ကို စစ်ဆေးပါ။",
+            reply_markup=get_main_reply_keyboard()
+        )
+    await state.clear()
+
+
+# ==========================================
+# 15. OTHER COMMAND HANDLERS (မူရင်းအတိုင်း)
 # ==========================================
 @auth_router.message(Command("start"))
-@auth_router.message(lambda m: m.text and m.text.lower().strip() in ['.start', '/start'])
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
     user = await db.get_user(message.from_user.id)
     active_users = await db.get_active_users()
     is_active = message.from_user.id in active_users
@@ -855,7 +930,7 @@ async def cmd_start(message: types.Message):
 
 
 # ==========================================
-# 14. REPLY KEYBOARD HANDLERS
+# 16. REPLY KEYBOARD HANDLERS (မူရင်းအတိုင်း)
 # ==========================================
 @auth_router.message(lambda m: m.text and m.text.strip() == "▶️ Start Auto-Bet")
 async def handle_start_button(message: types.Message):
@@ -892,7 +967,7 @@ async def handle_start_button(message: types.Message):
     # If Real Mode, ensure Playwright login
     if mode == "real":
         if user_id not in playwright_sessions:
-            await message.reply("🔐 <b>Real Mode အတွက် Login လိုအပ်ပါသည်။\nကျေးဇူးပြု၍ /login [username] [password] ကို အသုံးပြုပါ။</b>")
+            await message.reply("🔐 <b>Real Mode အတွက် Login လိုအပ်ပါသည်။\nကျေးဇူးပြု၍ 🔐 Login ကိုနှိပ်ပါ။</b>")
             return
 
     await message.reply(
@@ -919,8 +994,6 @@ async def handle_stop_button(message: types.Message):
         return
 
     await db.deactivate_session(user_id)
-
-    # Delete pending bets
     await db.bets.delete_many({"user_id": user_id, "result": None})
 
     user = await db.get_user(user_id)
@@ -935,11 +1008,15 @@ async def handle_stop_button(message: types.Message):
     )
 
 
-@auth_router.message(lambda m: m.text and m.text.strip() == "🔵 Real Mode" or m.text.strip() == "🟡 Virtual Mode")
+@auth_router.message(lambda m: m.text and m.text.strip() == "🟢 Real Mode" or m.text.strip() == "🟡 Virtual Mode")
 async def handle_mode_switch(message: types.Message):
     """Toggle between Real and Virtual Mode"""
     user_id = message.from_user.id
-    current_mode = "real" if "Real" in message.text else "virtual"
+    if "Real" in message.text:
+        current_mode = "real"
+    else:
+        current_mode = "virtual"
+    
     await db.user_sessions.update_one(
         {"user_id": user_id},
         {"$set": {"mode": current_mode}},
@@ -1068,29 +1145,7 @@ async def handle_top_button(message: types.Message):
 
 
 # ==========================================
-# 15. PLAYWRIGHT LOGIN COMMAND
-# ==========================================
-@auth_router.message(Command("login"))
-async def cmd_playwright_login(message: types.Message):
-    """Playwright ဖြင့် Login ဝင်ရန်"""
-    args = message.text.split()
-    if len(args) < 3:
-        await message.reply("⚠️ <b>အသုံးပြုနည်း:</b> /login [username] [password]")
-        return
-    username = args[1]
-    password = args[2]
-    user_id = message.from_user.id
-
-    await message.reply("🔄 Playwright ဖြင့် Login ဝင်နေပါသည်...")
-    success = await playwright_login(user_id, username, password)
-    if success:
-        await message.reply("✅ Playwright Login Successful! Real Mode အတွက် အဆင်သင့်ဖြစ်ပါပြီ။")
-    else:
-        await message.reply("❌ Playwright Login Failed! ကျေးဇူးပြု၍ username/password ကို စစ်ဆေးပါ။")
-
-
-# ==========================================
-# 16. TARGET INPUT HANDLER
+# 17. TARGET INPUT HANDLER (မူရင်းအတိုင်း)
 # ==========================================
 user_target_input = {}
 
@@ -1148,7 +1203,7 @@ async def cmd_cancel(message: types.Message):
 
 
 # ==========================================
-# 17. INLINE KEYBOARD CALLBACK HANDLERS
+# 18. INLINE KEYBOARD CALLBACK HANDLERS (မူရင်းအတိုင်း)
 # ==========================================
 @auth_router.callback_query(lambda c: c.data and c.data.startswith("usermode_"))
 async def cb_user_mode_select(callback: types.CallbackQuery):
@@ -1226,7 +1281,7 @@ async def cb_process_withdraw(callback: types.CallbackQuery):
 
 
 # ==========================================
-# 18. BET SIZE HANDLERS
+# 19. BET SIZE HANDLERS (မူရင်းအတိုင်း)
 # ==========================================
 @auth_router.callback_query(lambda c: c.data == "cmd_betsize")
 async def cb_betsize(callback: types.CallbackQuery):
@@ -1361,7 +1416,7 @@ async def cb_back(callback: types.CallbackQuery):
 
 
 # ==========================================
-# 19. OWNER ONLY COMMANDS (မူရင်းအတိုင်း)
+# 20. OWNER ONLY COMMANDS (မူရင်းအတိုင်း)
 # ==========================================
 @owner_router.message(Command("addsudo"))
 @owner_router.message(lambda m: m.text and m.text.lower().strip() in ['.addsudo', '/addsudo'])
@@ -1516,7 +1571,7 @@ async def cmd_sudo_list(message: types.Message):
 
 
 # ==========================================
-# 20. INITIALIZATION & MAIN
+# 21. INITIALIZATION & MAIN
 # ==========================================
 async def init_system():
     global DEFAULT_AI_MODE, SUDO_USERS
