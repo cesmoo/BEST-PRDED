@@ -37,7 +37,7 @@ auth_router = Router()
 
 LAST_PROCESSED_ISSUE = None
 DEFAULT_AI_MODE = "ensemble"
-DEFAULT_BET_SEQUENCE = [100, 300, 900, 2700, 8100, 24300]
+DEFAULT_BET_SEQUENCE = [10, 20, 40, 80]
 
 BASE_HEADERS = {
     'authority': 'api.bigwinqaz.com',
@@ -237,7 +237,6 @@ async def auto_game_broadcaster_loop():
                                 user_data = await db.get_user(user_tg_id)
                                 if user_data["balance"] >= bet_amount:
                                     page = session_data["page"]
-                                    # Execute asynchronously to avoid blocking the loop
                                     is_success = await execute_playwright_bet(page, predicted_size, bet_amount)
                                     if is_success:
                                         await db.place_bet(user_tg_id, next_issue, bet_amount, predicted_size, u_mode)
@@ -339,7 +338,7 @@ async def process_password(message: types.Message, state: FSMContext):
             await page.wait_for_timeout(2000)
 
             await state.update_data(is_logged_in=True, username=username, user_id=uid.strip(), nickname=nick.strip(), balance=bal.strip())
-            await state.set_state(None) # State ကို ရှင်းလင်းလိုက်ပါမည် (Error ကင်းစေရန်)
+            await state.set_state(None)
 
             active_sessions[user_tg_id] = {"playwright": p, "browser": browser, "page": page, "is_auto_active": False}
 
@@ -360,10 +359,10 @@ async def process_password(message: types.Message, state: FSMContext):
         await loading_msg.delete()
 
 # ==========================================
-# 8. MENUS & CONTROL HANDLERS (STATE FREE)
+# 8. MENUS & CONTROL HANDLERS (ROBUST EMOJI MATCH)
 # ==========================================
-# ပြဿနာဖြစ်စေသော State ကန့်သတ်ချက်များကို ဤနေရာတွင် ဖယ်ရှားထားပါသည်
-@auth_router.message(F.text == "▶️ Start Auto-Bet")
+# Emojis ကွဲလွဲမှုကို ကျော်လွှားရန် .contains() စနစ်ပြောင်းလဲထားသည်
+@auth_router.message(F.text.contains("Start Auto-Bet"))
 async def handle_start(message: types.Message):
     user_tg_id = message.from_user.id
     if user_tg_id not in active_sessions:
@@ -373,7 +372,7 @@ async def handle_start(message: types.Message):
     await db.reset_session_profit(user_tg_id)
     await message.answer("🟢 <b>Auto-Bet စတင်ပါပြီ!</b>\nနောက်ပွဲစဉ်စောင့်ကြည့်ပြီး AI ဖြင့် အလိုအလျောက် ထိုးပေးပါမည်။", reply_markup=get_logged_in_keyboard(True))
 
-@auth_router.message(F.text == "⏹️ Stop Auto-Bet")
+@auth_router.message(F.text.contains("Stop Auto-Bet"))
 async def handle_stop(message: types.Message):
     user_tg_id = message.from_user.id
     if user_tg_id not in active_sessions:
@@ -382,7 +381,7 @@ async def handle_stop(message: types.Message):
     await db.deactivate_session(user_tg_id)
     await message.answer("🔴 <b>Auto-Bet ရပ်တန့်ပါပြီ!</b>", reply_markup=get_logged_in_keyboard(False))
 
-@auth_router.message(F.text == "💰 Balance")
+@auth_router.message(F.text.contains("Balance"))
 async def handle_balance(message: types.Message):
     if message.from_user.id not in active_sessions:
         return await message.answer("⚠️ အရင်ဆုံး <b>🔐 Login</b> ဝင်ပေးပါ။", reply_markup=get_main_keyboard())
@@ -390,7 +389,7 @@ async def handle_balance(message: types.Message):
     is_active = active_sessions[message.from_user.id]["is_auto_active"]
     await message.answer(f"💰 <b>Balance:</b> {user['balance']:,.2f} Ks\n📈 <b>Session Profit:</b> {user.get('session_profit', 0):,.2f} Ks", reply_markup=get_logged_in_keyboard(is_active))
 
-@auth_router.message(F.text == "🧠 AI Mode")
+@auth_router.message(F.text.contains("AI Mode"))
 async def handle_mode(message: types.Message):
     if message.from_user.id not in active_sessions:
         return await message.answer("⚠️ အရင်ဆုံး <b>🔐 Login</b> ဝင်ပေးပါ။", reply_markup=get_main_keyboard())
@@ -400,35 +399,41 @@ async def handle_mode(message: types.Message):
 
 @auth_router.callback_query(F.data.startswith("usermode_"))
 async def cb_user_mode(callback: types.CallbackQuery):
+    await callback.answer() # Inline button loading လည်ပြီး ငြိမ်သွားမှုကို ဖြေရှင်းရန် တုံ့ပြန်ချက်ပေးခြင်း
     mode_key = callback.data.replace("usermode_", "")
     if mode_key in AI_MODES:
         await db.update_user_ai_mode(callback.from_user.id, mode_key)
-        await callback.message.edit_text(f"✅ <b>AI Mode ပြောင်းပြီး!</b>\n🧠 {AI_MODES[mode_key]['name']}")
+        # လက်ရှိရွေးလိုက်တဲ့ Mode ကိုပါ Inline Keyboard မှာ ကြယ်ပွင့်ပြောင်းရန် ပြန်ဆွဲခြင်း
+        await callback.message.edit_text(
+            f"✅ <b>AI Mode ပြောင်းပြီး!</b>\n🧠 {AI_MODES[mode_key]['name']}\n\n👇 အခြား Mode သို့ ထပ်မံပြောင်းလဲနိုင်သည်-",
+            reply_markup=get_ai_mode_inline_keyboard(mode_key)
+        )
 
-@auth_router.message(F.text == "📋 Info")
+@auth_router.message(F.text.contains("Info"))
 async def show_info(message: types.Message, state: FSMContext):
     if message.from_user.id not in active_sessions:
         return await message.answer("⚠️ အရင်ဆုံး <b>🔐 Login</b> ဝင်ပေးပါ။", reply_markup=get_main_keyboard())
     data = await state.get_data()
+    user = await db.get_user(message.from_user.id)
     is_auto = active_sessions[message.from_user.id]["is_auto_active"]
     await message.answer(
         f"👤 <b>User Information:</b>\n"
-        f"├─ 🆔 <b>User ID:</b> {data.get('user_id', 'N/A')}\n"
+        f"├─ 🆔 <b>User ID:</b> {data.get('user_id', user['user_id'])}\n"
         f"├─ 📱 <b>Username:</b> {data.get('username', 'N/A')}\n"
         f"├─ 🏷️ <b>Nickname:</b> {data.get('nickname', 'Unknown')}\n"
-        f"├─ 💰 <b>Balance:</b> {data.get('balance', '0.00 Ks')}\n"
+        f"├─ 💰 <b>Balance:</b> {user['balance']:,.2f} Ks\n"
         f"└─ 🤖 <b>Auto-Bet Status:</b> {'Active 🟢' if is_auto else 'Inactive 🔴'}",
         reply_markup=get_logged_in_keyboard(is_auto)
     )
 
-@auth_router.message(F.text == "🎰 Games")
+@auth_router.message(F.text.contains("Games"))
 async def games(message: types.Message):
     if message.from_user.id not in active_sessions:
         return await message.answer("⚠️ အရင်ဆုံး <b>🔐 Login</b> ဝင်ပေးပါ။", reply_markup=get_main_keyboard())
     is_auto = active_sessions[message.from_user.id]["is_auto_active"]
     await message.answer("🎮 <b>Win Go 30s</b> ကို ရွေးချယ်ထားပါသည်။ Auto Bet စနစ်ဖွင့်ထားပါက နောက်ကွယ်မှ အလိုအလျောက် ထိုးပေးပါမည်။", reply_markup=get_logged_in_keyboard(is_auto))
 
-@auth_router.message(F.text == "🔐 Logout")
+@auth_router.message(F.text.contains("Logout"))
 async def logout(message: types.Message, state: FSMContext):
     user_tg_id = message.from_user.id
     if user_tg_id in active_sessions:
